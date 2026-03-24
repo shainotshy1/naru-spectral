@@ -77,7 +77,7 @@ python train_model.py --num-gpus=1 --dataset=dmv --epochs=20 --warmups=8000 --bs
     --residual --layers=5 --fc-hiddens=256 --direct-io --column-masking
 
 # Evaluate.  To enable estimators other than Naru, see section below.
-python eval_model.py --dataset=dmv --glob='<ckpt from above>' --num-queries=2000 \
+python eval_model.py --dataset=dmv --glob='dmv-7.3MB-model20.175-data19.500-made-resmade-hidden256_256_256_256_256-emb32-directIo-binaryInone_hotOut-inputNoEmbIfLeq-colmask-20epochs-seed0.pt' --num-queries=2000 \
     --residual --layers=5 --fc-hiddens=256 --direct-io --column-masking
     
 # Alternative: larger MADE model reported in paper.

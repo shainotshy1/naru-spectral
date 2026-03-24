@@ -17,6 +17,8 @@ import common
 import made
 import transformer
 
+import math
+
 OPS = {
     '>': np.greater,
     '<': np.less,
@@ -65,6 +67,9 @@ class CardEst(object):
         self.errs.append(err)
         self.est_cards.append(est_card)
         self.true_cards.append(true_card)
+
+    def AddBaseCardinality(self, base_cardinality):
+        self.base_cardinality = base_cardinality
 
     def __str__(self):
         return self.name
@@ -225,9 +230,20 @@ class ProgressiveSampling(CardEst):
             op = operators[natural_idx]
             if op is not None:
                 # There exists a filter.
-                valid_i = OPS[op](columns[natural_idx].all_distinct_values,
-                                  vals[natural_idx]).astype(np.float32,
-                                                            copy=False)
+                column_values = columns[natural_idx].all_distinct_values
+                filter_value = vals[natural_idx]
+
+                filter_nan = type(filter_value) is float and math.isnan(filter_value)
+                column_nan = type(column_values[0]) is float and math.isnan(column_values[0])
+
+                valid_i = np.zeros(len(column_values), dtype=np.float32)
+                if filter_nan:
+                    if column_nan:
+                        valid_i[0] = 1
+                elif column_nan:
+                    valid_i[1:] = OPS[op](column_values[1:], filter_value).astype(np.float32, copy=False)
+                else:
+                    valid_i = OPS[op](column_values, filter_value).astype(np.float32, copy=False)
             else:
                 continue
 

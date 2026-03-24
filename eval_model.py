@@ -238,29 +238,30 @@ def Query(estimators,
     if card == 0:
         return
 
-    pprint('Q(', end='')
-    for c, o, v in zip(cols, ops, vals):
-        pprint('{} {} {}, '.format(c.name, o, str(v)), end='')
-    pprint('): ', end='')
+    # pprint('Q(', end='')
+    # for c, o, v in zip(cols, ops, vals):
+    #     pprint('{} {} {}, '.format(c.name, o, str(v)), end='')
+    # pprint('): ', end='')
 
-    pprint('\n  actual {} ({:.3f}%) '.format(card,
-                                             card / table.cardinality * 100),
-           end='')
+    # pprint('\n  actual {} ({:.3f}%) '.format(card,
+    #                                          card / table.cardinality * 100),
+    #        end='')
 
     for est in estimators:
         est_card = est.Query(cols, ops, vals)
         err = ErrorMetric(est_card, card)
         est.AddError(err, est_card, card)
-        pprint('{} {} (err={:.3f}) '.format(str(est), est_card, err), end='')
-    pprint()
+        est.AddBaseCardinality(table.cardinality)
+    #     pprint('{} {} (err={:.3f}) '.format(str(est), est_card, err), end='')
+    # pprint()
 
 
 def ReportEsts(estimators):
     v = -1
     for est in estimators:
-        print(est.name, 'max', np.max(est.errs), '99th',
-              np.quantile(est.errs, 0.99), '95th', np.quantile(est.errs, 0.95),
-              'median', np.quantile(est.errs, 0.5))
+        # print(est.name, 'max', np.max(est.errs), '99th',
+        #       np.quantile(est.errs, 0.99), '95th', np.quantile(est.errs, 0.95),
+        #       'median', np.quantile(est.errs, 0.5))
         v = max(v, np.max(est.errs))
     return v
 
@@ -281,11 +282,11 @@ def RunN(table,
     for i in range(num):
         do_print = False
         if i % log_every == 0:
-            if last_time is not None:
-                print('{:.1f} queries/sec'.format(log_every /
-                                                  (time.time() - last_time)))
+            # if last_time is not None:
+                # print('{:.1f} queries/sec'.format(log_every /
+                #                                   (time.time() - last_time)))
             do_print = True
-            print('Query {}:'.format(i), end=' ')
+            # print('Query {}:'.format(i), end=' ')
             last_time = time.time()
         query = GenerateQuery(cols, rng, table)
         Query(estimators,
@@ -296,7 +297,7 @@ def RunN(table,
               table=table,
               oracle_est=oracle_est)
 
-        max_err = ReportEsts(estimators)
+        # max_err = ReportEsts(estimators)
     return False
 
 
@@ -416,6 +417,8 @@ def MakeMade(scale, cols_to_train, seed, fixed_ordering=None):
         column_masking=args.column_masking,
     ).to(DEVICE)
 
+    print(scale, len(cols_to_train), seed, fixed_ordering, args.inv_order, args.layers, args.input_encoding, args.output_encoding, args.direct_io, args.residual, args.column_masking)
+
     return model
 
 
@@ -458,7 +461,7 @@ def SaveEstimators(path, estimators, return_df=False):
             'true_card': est.true_cards,
             'query_dur_ms': est.query_dur_ms,
         }
-        results = results.append(pd.DataFrame(data))
+        results = results._append(pd.DataFrame(data))
     if return_df:
         return results
     results.to_csv(path, index=False)
@@ -523,6 +526,7 @@ def Main():
                     seed=seed,
                     fixed_ordering=order,
                 )
+                print("YAY")
             else:
                 assert False, args.dataset
 
