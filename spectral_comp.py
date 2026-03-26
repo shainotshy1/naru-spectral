@@ -129,10 +129,10 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_spectral(gen_query, oracle_est, table, num_masks=1000):
+def train_spectral(oracle_est, table, num_masks=1000, avg_n=1):
     oracle = copy.deepcopy(oracle_est)
     spec_est = SpectralEstimator(table)
-    spec_est.train(gen_query, oracle, num_masks=num_masks)
+    spec_est.train(oracle, num_masks=num_masks, avg_n=avg_n)
     return spec_est
 
 def print_est(est):
@@ -152,11 +152,12 @@ def main():
     table, naru_est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE)
 
     print("Training Spectral")
-    num_masks = 100000
-    spec_est = train_spectral(gen_query, oracle_est, table, num_masks=num_masks)
+    num_masks = 1000
+    avg_n = 5
+    spec_est = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n)
 
     num_filters = rng.choice(np.arange(3, 8))
-    num_queries = 1000
+    num_queries = 100
     
     print("Evaluating...")
     for _ in tqdm(range(num_queries)):
