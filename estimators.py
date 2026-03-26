@@ -545,7 +545,10 @@ class Oracle(CardEst):
                 bools = inds
             else:
                 bools &= inds
-        c = bools.sum()
+        if bools is not None:
+            c = bools.sum()
+        else:
+            c = self.table.cardinality
         self.OnEnd()
         if return_masks:
             return bools

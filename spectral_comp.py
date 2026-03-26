@@ -6,9 +6,17 @@ import glob
 import re
 import made
 from tqdm import tqdm
+import copy
 
 import estimators as estimators_lib
 from eval_model import ReportModel, SaveEstimators, RunN, Query
+from spectral_estimator import SpectralEstimator
+
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names"
+)
 
 def calc_cardinality(table, columns, operators, values):
     mask = np.ones(len(table.data), dtype=bool)
@@ -40,7 +48,7 @@ def gen_query(table, rng, num_filters = 5):
     vals[6] = vals[6].to_datetime64()
     
     idxs = rng.choice(len(table.columns), replace=False, size=num_filters)
-    ops = rng.choice(['<=', '>=', '='], size=num_filters)
+    ops = rng.choice(['='], size=num_filters) # , ">=", "<="
     ops_all_eqs = ['='] * num_filters
     sensible_to_do_range = [table.columns[i].DistributionSize() >= 10 for i in idxs]
     ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
@@ -113,61 +121,59 @@ def setup_data_model_eval(seed, table_name, target_ckpt, device):
 
     return table, est, oracle_est
 
+def execute_on_est(est, true_card, query, table, oracle_est):
+    Query([est],
+        False,
+        oracle_card=true_card,
+        query=query,
+        table=table,
+        oracle_est=oracle_est)
+
+def train_spectral(gen_query, oracle_est, table, num_masks=1000):
+    oracle = copy.deepcopy(oracle_est)
+    spec_est = SpectralEstimator(table)
+    spec_est.train(gen_query, oracle, num_masks=num_masks)
+    return spec_est
+
+def print_est(est):
+    print(est.name, 'max', np.round(np.max(est.errs), 3), '99th',
+               np.round(np.quantile(est.errs, 0.99), 3), '95th', np.round(np.quantile(est.errs, 0.95), 3),
+              'median', np.round(np.quantile(est.errs, 0.5), 3), 'mean', np.round(np.mean(est.errs), 3))
+
 def main():
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     print('Device', DEVICE)
 
     seed = 1234
     rng = np.random.RandomState(seed)
-    num_filters = rng.choice(np.arange(3, 6))
 
     table_name = 'dmv-tiny'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
-    table, est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE)
+    table, naru_est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE)
 
+    print("Training Spectral")
+    num_masks = 100000
+    spec_est = train_spectral(gen_query, oracle_est, table, num_masks=num_masks)
 
-    # str_repr = ""
-    # for col, op, val in zip(cols, ops, vals):
-    #     str_repr += f"{col.name}{op}{val}, "
-    # print(f"Query: {str_repr[:-2]}")
-
-    # print(f"True Cardinality: {true_card}")
-
-    num_queries = 1000
+    num_filters = rng.choice(np.arange(3, 8))
+    num_queries = 10
     
+    print("Evaluating...")
     for _ in tqdm(range(num_queries)):
         col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters)
         cols = np.take(table.columns, col_idxs)
         true_card = calc_cardinality(table, cols, ops, vals)
 
         query = (cols, ops, vals)
-        Query([est],
-            False,
-            oracle_card=true_card,
-            query=query,
-            table=table,
-            oracle_est=oracle_est)
-    
-    print(est.name, 'max', np.round(np.max(est.errs), 3), '99th',
-               np.round(np.quantile(est.errs, 0.99), 3), '95th', np.round(np.quantile(est.errs, 0.95), 3),
-              'median', np.round(np.quantile(est.errs, 0.5), 3))
+        execute_on_est(naru_est, true_card, query, table, oracle_est)
+        execute_on_est(spec_est, true_card, query, table, oracle_est)
 
-    # print(est.est_cards, est.true_cards)
+    print_est(spec_est)
+    print_est(naru_est)
 
-    err_csv = "results1.csv"
-    SaveEstimators(err_csv, [est])
-    print('...Done, result:', err_csv)
+    SaveEstimators("results_naru.csv", [naru_est])
+    SaveEstimators("results_spec.csv", [spec_est])
+    print('...Done')
 
 if __name__ == "__main__":
     main()
-
-    # num_queries = 10
-    # RunN(table,
-    #     table.columns,
-    #     [est],
-    #     rng=rng,
-    #     num=num_queries,
-    #     log_every=1,
-    #     num_filters=num_filters,
-    #     oracle_cards=None,
-    #     oracle_est=oracle_est)
