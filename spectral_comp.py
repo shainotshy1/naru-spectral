@@ -156,7 +156,7 @@ def main():
     spec_est = train_spectral(gen_query, oracle_est, table, num_masks=num_masks)
 
     num_filters = rng.choice(np.arange(3, 8))
-    num_queries = 10
+    num_queries = 1000
     
     print("Evaluating...")
     for _ in tqdm(range(num_queries)):

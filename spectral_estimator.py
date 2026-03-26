@@ -17,17 +17,17 @@ class SpectralEstimator(CardEst):
         self.col_val_map = {}
         self.inv_col_val_map = {}
         for c,d in zip(self.table.Columns(), column_domains):
-            for v in d:
-                idx = len(self.col_val_map)
-                self.col_val_map[(c,v)] = idx
-                self.inv_col_val_map[idx] = (c,v)
-                
+            # for v in d:
+            idx = len(self.col_val_map)
+            self.col_val_map[c] = idx
+            self.inv_col_val_map[idx] = (c, d)
+                            
     def _query_to_bitmap(self, columns, operators, vals):
         assert all([op == '=' for op in operators]) # Only allow equijoins
         n = len(self.col_val_map)
         bitmap = np.zeros(n)
         for c,v in zip(columns, vals):
-            bitmap[self.col_val_map[(c,v)]] = 1
+            bitmap[self.col_val_map[c]] = 1
         return bitmap
     
     def _bitmap_to_query(self, bitmap):
@@ -35,7 +35,8 @@ class SpectralEstimator(CardEst):
         comps = [self.inv_col_val_map[i] for i,b in enumerate(bitmap) if b == 1]
         if len(comps) == 0:
             return [], [], []
-        columns, vals = zip(*comps)
+        columns, domains = zip(*comps)
+        vals = [np.random.choice(d) for d in domains]
         operators = ["="] * len(comps)
         return columns, operators, vals
 
@@ -48,9 +49,9 @@ class SpectralEstimator(CardEst):
         c = self.model.predict(mask.reshape(1, -1)) # type: ignore
         self.OnEnd()
 
-        return np.max(np.round(c[0]), 0)
+        return np.maximum(np.round(c[0]), 0)
 
-    def train(self, gen_query, oracle_est, num_masks=1000, p=0.02):
+    def train(self, gen_query, oracle_est, num_masks=1000, p=0.2):
         n = len(self.col_val_map)
         all_masks = np.random.choice(2, size=(num_masks, n), p = np.array([1-p, p])) # p probability of a 1
         values = []
