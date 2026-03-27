@@ -55,7 +55,7 @@ def MakeMade(scale, cols_to_train, seed=1234, fixed_ordering=None, column_maskin
     model = made.MADE(
         nin=len(cols_to_train),
         hidden_sizes=[scale] *
-        layers,
+        layers if layers > 0 else [512, 256, 512, 128, 1024],
         nout=sum([c.DistributionSize() for c in cols_to_train]),
         input_bins=[c.DistributionSize() for c in cols_to_train],
         input_encoding='binary',
@@ -75,20 +75,36 @@ def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None):
     table = load_data(table_name)
 
     if table_name == 'dmv-tiny':
+        column_masking = False
         model = MakeMade(
             scale=128,
             cols_to_train=table.columns,
             fixed_ordering=None,
+            column_masking=column_masking
         ).to(device)
-    else:
+    elif target_ckpt.split('/')[-1].startswith('dmv-7.3MB'):
+        column_masking = True
         model = MakeMade(
             scale=256,
             cols_to_train=table.columns,
             fixed_ordering=None,
-            column_masking=True,
+            column_masking=column_masking,
             layers=5,
             direct_io=True
         ).to(device)
+    elif target_ckpt.split('/')[-1].startswith('dmv-19.8MB'):
+        column_masking = True
+        model = MakeMade(
+            scale=128,
+            cols_to_train=table.columns,
+            fixed_ordering=None,
+            column_masking=column_masking,
+            layers=0,
+            direct_io=True,
+            residual=False
+        ).to(device)
+    else:
+        raise ValueError(f"Unsupported checkpoint: {target_ckpt}")
 
     print('Loading ckpt:', target_ckpt)
     model.load_state_dict(torch.load(target_ckpt))
@@ -121,7 +137,7 @@ def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None):
                                             table,
                                             psample,
                                             device=device,
-                                            shortcircuit=False)
+                                            shortcircuit=column_masking)
     
     est.name = str(est) + '_{}_{:.3f}'.format(ckpt.seed, ckpt.bits_gap)
 
@@ -170,9 +186,9 @@ def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err
 
     plt.title(title)
     plt.xlabel(label)
-    # plt.xlim(1, 1000)
+    # plt.xlim(1, 25)
     plt.ylabel("Density")
-    plt.legend()
+    plt.legend(fontsize=14)
     plt.grid(axis='y', linestyle='--', alpha=0.8)
     plt.tight_layout()
     plt.savefig(filename, dpi=300)
@@ -198,8 +214,8 @@ def main():
     rng = np.random.RandomState(seed)
 
     max_rows = None
-    table_name = 'dmv' #'dmv'
-    target_ckpt = glob.glob('./models/dmv-7.3MB*.pt')[0] #'dmv-7.3MB*'
+    table_name = 'dmv'
+    target_ckpt = glob.glob('./models/dmv-19.8MB*.pt')[0]
     table, naru_est, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows)
     naru_est.name = "Naru"
 
@@ -209,13 +225,13 @@ def main():
     max_chunks = 2
     p = 0.05
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
-    path=f'models/mce_{table_name}_chunks={max_chunks}_rows={rows}.txt'
+    path=f'models/mce_{table_name}_chunks={max_chunks}_rows={rows}_masks={num_masks // 1000}k.txt'
     # spec_est = train_mce(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p, path=path)
     # spec_est.name = f"MCE-{num_masks // 1000}k-c{max_chunks}"
 
     num_queries = 1000
     
-    oracle_path = f'datasets/{table_name}_cards_rows_{rows}_seed_{seed}.npy'
+    oracle_path = f'datasets/{table_name}_cards_rows_{rows}_seed_{seed}_queries_{num_queries}.npy'
     preloaded_cards = os.path.exists(oracle_path)
     if preloaded_cards:
         print(f"Loading oracle cards from: {oracle_path}")
@@ -248,8 +264,8 @@ def main():
     print_est(naru_est)
 
     colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_histograms([naru_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="Cardinality Error Distributions (DMV-Tiny)", colors=colors)
-    plot_estimators_boxplots([naru_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="Cardinality Execution Distributions (DMV-Tiny)")
+    plot_estimators_histograms([naru_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="", colors=colors)
+    plot_estimators_boxplots([naru_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
 
     # Cherry pick outliers (slowest MCE is faster than the fastest Naru)
 

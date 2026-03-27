@@ -259,9 +259,9 @@ def Query(estimators,
 def ReportEsts(estimators):
     v = -1
     for est in estimators:
-        # print(est.name, 'max', np.max(est.errs), '99th',
-        #       np.quantile(est.errs, 0.99), '95th', np.quantile(est.errs, 0.95),
-        #       'median', np.quantile(est.errs, 0.5))
+        print(est.name, 'max', np.max(est.errs), '99th',
+              np.quantile(est.errs, 0.99), '95th', np.quantile(est.errs, 0.95),
+              'median', np.quantile(est.errs, 0.5))
         v = max(v, np.max(est.errs))
     return v
 
