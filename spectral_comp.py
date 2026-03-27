@@ -138,10 +138,10 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_spectral(oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2):
+def train_spectral(oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2):
     oracle = copy.deepcopy(oracle_est)
     spec_est = SpectralEstimator(table, max_chunks=max_chunks)
-    spec_est.train(oracle, num_masks=num_masks, avg_n=avg_n)
+    spec_est.train(oracle, num_masks=num_masks, avg_n=avg_n, p=p)
     return spec_est
 
 def print_est(est):
@@ -198,15 +198,16 @@ def main():
     naru_est.name = "Naru"
 
     print("Training Spectral")
-    num_masks = 1000
+    num_masks = 10000
     avg_n = 10
-    spec_est1 = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=1)
-    spec_est1.name = "MCE-1k-c1" # Masked Cardinality Estimator
-    spec_est2 = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=2)
-    spec_est2.name = "MCE-1k-c2"
+    # Masked Cardinality Estimator
+    max_chunks = 3
+    p = 0.05
+    spec_est = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p)
+    spec_est.name = f"MCE-1k-c{max_chunks}"
 
     num_filters = rng.choice(np.arange(3, 8))
-    num_queries = 5000
+    num_queries = 1000
     
     print("Evaluating...")
     for _ in tqdm(range(num_queries)):
@@ -216,21 +217,20 @@ def main():
 
         query = (cols, ops, vals)
         execute_on_est(naru_est, true_card, query, table, None)
-        execute_on_est(spec_est1, true_card, query, table, None)
-        execute_on_est(spec_est2, true_card, query, table, None)
+        execute_on_est(spec_est, true_card, query, table, None)
 
-    print_est(spec_est1)
-    print_est(spec_est2)
+    # print_est(spec_est1)
+    print_est(spec_est)
     print_est(naru_est)
 
     colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_histograms([naru_est, spec_est1, spec_est2], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="Cardinality Error Distributions (DMV-Tiny)", colors=colors)
-    plot_estimators_boxplots([naru_est, spec_est1, spec_est2], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="Cardinality Execution Distributions (DMV-Tiny)")
+    plot_estimators_histograms([naru_est, spec_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="Cardinality Error Distributions (DMV-Tiny)", colors=colors)
+    plot_estimators_boxplots([naru_est, spec_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="Cardinality Execution Distributions (DMV-Tiny)")
 
     # Cherry pick outliers (slowest MCE is faster than the fastest Naru)
 
     SaveEstimators("results_naru.csv", [naru_est])
-    SaveEstimators("results_spec.csv", [spec_est2])
+    SaveEstimators("results_spec.csv", [spec_est])
     print('...Done')
 
 if __name__ == "__main__":
