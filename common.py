@@ -149,7 +149,7 @@ class Table(object):
         return self.name_to_index[name]
 
     def EnableSubsample(self, max_rows):
-        if max_rows is not None:
+        if max_rows is not None and self.cardinality > max_rows:
             indices = np.random.choice(np.arange(self.cardinality), size=max_rows, replace=False)
             for col in self.columns:
                 col.EnableSubsample(indices)

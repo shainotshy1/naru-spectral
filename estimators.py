@@ -534,17 +534,30 @@ class Oracle(CardEst):
         self.OnStart()
 
         bools = None
+        col_ops_vals = {} # Impose OR on all operators on the same column
         for c, o, v in zip(columns, operators, vals):
-            if self.limit_first_n is None:
-                inds = OPS[o](c.data, v)
-            else:
-                # For data shifts experiment.
-                inds = OPS[o](c.data[:self.limit_first_n], v)
+            if c not in col_ops_vals:
+                col_ops_vals[c] = []
+            col_ops_vals[c].append((o, v))
 
+        for c, ov_lst in col_ops_vals.items():
+            inds = None
+            for o,v in ov_lst:
+                if self.limit_first_n is None:
+                    inds_n = OPS[o](c.data, v)
+                else:
+                    # For data shifts experiment.
+                    inds_n = OPS[o](c.data[:self.limit_first_n], v)
+                
+                if inds is None:
+                    inds = inds_n
+                else:
+                    inds |= inds_n
             if bools is None:
                 bools = inds
             else:
                 bools &= inds
+
         if bools is not None:
             c = bools.sum()
         else:

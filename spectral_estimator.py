@@ -44,7 +44,10 @@ class SpectralEstimator(CardEst):
         n = len(self.col_val_map)
         bitmap = np.zeros(n)
         for c,v in zip(columns, vals):
-            i = self.col_chunk_map[c][v]
+            if type(v) is float and math.isnan(v):
+                i = 0 # ALWAYS 'nan' in first chunk
+            else:
+                i = self.col_chunk_map[c][v]
             bitmap[self.col_val_map[(c, i)]] = 1
         return bitmap
     

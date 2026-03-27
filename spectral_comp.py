@@ -1,4 +1,5 @@
 import collections
+import math
 import numpy as np
 import datasets
 import torch
@@ -7,6 +8,9 @@ import re
 import made
 from tqdm import tqdm
 import copy
+import math
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
 
 import estimators as estimators_lib
 from eval_model import ReportModel, SaveEstimators, RunN, Query
@@ -17,19 +21,6 @@ warnings.filterwarnings(
     "ignore",
     message="X does not have valid feature names"
 )
-
-def calc_cardinality(table, columns, operators, values):
-    mask = np.ones(len(table.data), dtype=bool)
-    for col, op, val in zip(columns, operators, values):
-        col_data = table.data[col.name] 
-        if op == '=':
-            target_op = '=='
-        else:
-            target_op = op
-        mask &= eval("col_data {} val".format(target_op))
-
-    true_cardinality = mask.sum()
-    return true_cardinality
 
 def load_data(ds_name):
     assert ds_name in ['dmv-tiny', 'dmv']
@@ -46,14 +37,18 @@ def gen_query(table, rng, num_filters = 5):
     s = table.data.iloc[rng.randint(0, table.cardinality)]
     vals = s.values
     vals[6] = vals[6].to_datetime64()
-    
-    idxs = rng.choice(len(table.columns), replace=False, size=num_filters)
-    ops = rng.choice(['='], size=num_filters) # , ">=", "<="
-    ops_all_eqs = ['='] * num_filters
-    sensible_to_do_range = [table.columns[i].DistributionSize() >= 10 for i in idxs]
-    ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
+    idxs = []
+    ops = []
+    target_vals = [float('nan')]
+    while any([type(v) is float and math.isnan(v) for v in target_vals]):
+        idxs = rng.choice(len(table.columns), replace=False, size=num_filters)
+        ops = rng.choice(['='], size=num_filters) # , ">=", "<="
+        ops_all_eqs = ['='] * num_filters
+        sensible_to_do_range = [table.columns[i].DistributionSize() >= 10 for i in idxs]
+        ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
+        target_vals = vals[idxs]
 
-    return idxs, ops, vals[idxs]
+    return idxs, ops, target_vals
 
 def MakeMade(scale, cols_to_train, seed, fixed_ordering=None, column_masking=False, residual=True, layers=4, direct_io=False):
     model = made.MADE(
@@ -143,9 +138,9 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_spectral(oracle_est, table, num_masks=1000, avg_n=1):
+def train_spectral(oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2):
     oracle = copy.deepcopy(oracle_est)
-    spec_est = SpectralEstimator(table)
+    spec_est = SpectralEstimator(table, max_chunks=max_chunks)
     spec_est.train(oracle, num_masks=num_masks, avg_n=avg_n)
     return spec_est
 
@@ -154,40 +149,88 @@ def print_est(est):
                np.round(np.quantile(est.errs, 0.99), 3), '95th', np.round(np.quantile(est.errs, 0.95), 3),
               'median', np.round(np.quantile(est.errs, 0.5), 3), 'mean', np.round(np.mean(est.errs), 3))
 
+def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err', title="", label='', alpha=0.4, colors=None):
+    plt.figure(figsize=(8, 6))
+    
+    if colors is None:
+        colors = plt.cm.tab10.colors # type: ignore
+
+    for i, est in enumerate(ests):
+        data = getattr(est, target_stat)
+        kde = gaussian_kde(data)
+        x = np.linspace(min(data), max(data), 500)
+        plt.fill_between(x, kde(x), alpha=alpha, color=colors[i % len(colors)], label=est.name)
+        plt.plot(x, kde(x), color=colors[i % len(colors)], linewidth=1)
+
+    plt.title(title)
+    plt.xlabel(label)
+    plt.xlim(1, 10)
+    plt.ylabel("Density")
+    plt.legend()
+    plt.grid(axis='y', linestyle='--', alpha=0.8)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
+def plot_estimators_boxplots(ests, filename="boxplots.png", target_stat='err', title="", label='', outliers=False):
+    data = [getattr(est, target_stat) for est in ests]
+    labels = [est.name for est in ests]
+    plt.figure(figsize=(6, 6))
+    plt.boxplot(data, tick_labels=labels, showfliers=outliers)
+    plt.title(title)
+    plt.ylabel(label)
+    plt.xticks(rotation=30)
+    plt.grid(axis='y', linestyle='--', alpha=0.7)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=300)
+    plt.close()
+
 def main():
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    seed = 1234
+    seed = 286
     rng = np.random.RandomState(seed)
 
-    max_rows = None
+    max_rows = 1000
     table_name = 'dmv-tiny' #'dmv'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0] #'dmv-7.3MB*'
     table, naru_est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE, max_rows=max_rows)
+    naru_est.name = "Naru"
 
     print("Training Spectral")
     num_masks = 1000
-    avg_n = 5
-    spec_est = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n)
+    avg_n = 10
+    spec_est1 = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=1)
+    spec_est1.name = "MCE-1k-c1" # Masked Cardinality Estimator
+    spec_est2 = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=2)
+    spec_est2.name = "MCE-1k-c2"
 
     num_filters = rng.choice(np.arange(3, 8))
-    num_queries = 100
+    num_queries = 5000
     
     print("Evaluating...")
     for _ in tqdm(range(num_queries)):
         col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters)
         cols = np.take(table.columns, col_idxs)
-        true_card = calc_cardinality(table, cols, ops, vals)
+        true_card = oracle_est.Query(cols, ops, vals)
 
         query = (cols, ops, vals)
-        execute_on_est(naru_est, true_card, query, table, oracle_est)
-        execute_on_est(spec_est, true_card, query, table, oracle_est)
+        execute_on_est(naru_est, true_card, query, table, None)
+        execute_on_est(spec_est1, true_card, query, table, None)
+        execute_on_est(spec_est2, true_card, query, table, None)
 
-    print_est(spec_est)
+    print_est(spec_est1)
+    print_est(spec_est2)
     print_est(naru_est)
 
+    colors = ['#C877E3', '#7796E3', '#B8EB9D']
+    plot_estimators_histograms([naru_est, spec_est1, spec_est2], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="Cardinality Error Distributions (DMV-Tiny)", colors=colors)
+    plot_estimators_boxplots([naru_est, spec_est1, spec_est2], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="Cardinality Execution Distributions (DMV-Tiny)")
+
+    # Cherry pick outliers (slowest MCE is faster than the fastest Naru)
+
     SaveEstimators("results_naru.csv", [naru_est])
-    SaveEstimators("results_spec.csv", [spec_est])
+    SaveEstimators("results_spec.csv", [spec_est2])
     print('...Done')
 
 if __name__ == "__main__":
