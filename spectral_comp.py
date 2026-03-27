@@ -70,21 +70,21 @@ def MakeMade(scale, cols_to_train, seed, fixed_ordering=None, column_masking=Fal
 
     return model
 
-def setup_data_model_eval(seed, table_name, target_ckpt, device, max_rows=None):
+def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None):
     table = load_data(table_name)
 
     if table_name == 'dmv-tiny':
         model = MakeMade(
             scale=128,
             cols_to_train=table.columns,
-            seed=seed,
+            seed=0,
             fixed_ordering=None,
         ).to(device)
     else:
         model = MakeMade(
             scale=256,
             cols_to_train=table.columns,
-            seed=seed,
+            seed=0,
             fixed_ordering=None,
             column_masking=True,
             layers=5,
@@ -104,7 +104,7 @@ def setup_data_model_eval(seed, table_name, target_ckpt, device, max_rows=None):
     bits_gap = model_bits - data_bits
 
     print(f"Subsampling {max_rows} rows")
-    table.EnableSubsample(max_rows)
+    table.EnableSubsample(max_rows, rng)
 
     Ckpt = collections.namedtuple(
         'Ckpt', 'epoch model_bits bits_gap path loaded_model seed')
@@ -138,9 +138,9 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_spectral(oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2):
+def train_spectral(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2):
     oracle = copy.deepcopy(oracle_est)
-    spec_est = SpectralEstimator(table, max_chunks=max_chunks)
+    spec_est = SpectralEstimator(table, rng, max_chunks=max_chunks)
     spec_est.train(oracle, num_masks=num_masks, avg_n=avg_n, p=p)
     return spec_est
 
@@ -164,7 +164,7 @@ def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err
 
     plt.title(title)
     plt.xlabel(label)
-    plt.xlim(1, 10)
+    # plt.xlim(1, 100)
     plt.ylabel("Density")
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.8)
@@ -192,18 +192,18 @@ def main():
     rng = np.random.RandomState(seed)
 
     max_rows = 1000
-    table_name = 'dmv-tiny' #'dmv'
-    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0] #'dmv-7.3MB*'
-    table, naru_est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE, max_rows=max_rows)
+    table_name = 'dmv' #'dmv'
+    target_ckpt = glob.glob('./models/dmv-7.3MB*.pt')[0] #'dmv-7.3MB*'
+    table, naru_est, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows)
     naru_est.name = "Naru"
 
     print("Training Spectral")
-    num_masks = 10000
+    num_masks = 1000
     avg_n = 10
     # Masked Cardinality Estimator
     max_chunks = 3
     p = 0.05
-    spec_est = train_spectral(oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p)
+    spec_est = train_spectral(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p)
     spec_est.name = f"MCE-1k-c{max_chunks}"
 
     num_filters = rng.choice(np.arange(3, 8))
@@ -219,7 +219,6 @@ def main():
         execute_on_est(naru_est, true_card, query, table, None)
         execute_on_est(spec_est, true_card, query, table, None)
 
-    # print_est(spec_est1)
     print_est(spec_est)
     print_est(naru_est)
 

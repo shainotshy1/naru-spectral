@@ -148,9 +148,9 @@ class Table(object):
         assert name in self.name_to_index
         return self.name_to_index[name]
 
-    def EnableSubsample(self, max_rows):
+    def EnableSubsample(self, max_rows, rng):
         if max_rows is not None and self.cardinality > max_rows:
-            indices = np.random.choice(np.arange(self.cardinality), size=max_rows, replace=False)
+            indices = rng.choice(np.arange(self.cardinality), size=max_rows, replace=False)
             for col in self.columns:
                 col.EnableSubsample(indices)
             

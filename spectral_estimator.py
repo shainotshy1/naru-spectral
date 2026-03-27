@@ -6,12 +6,13 @@ import math
 from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, ExactSolver # type:ignore
 
 class SpectralEstimator(CardEst):
-    def __init__(self, table, max_chunks=2):
+    def __init__(self, table, rng, max_chunks=2):
         super(SpectralEstimator, self).__init__()
         self.name = 'SpectralEst'
         self.model = None
         self.cv_r2 = None
         self.table = table
+        self.rng = rng
 
         column_domains = [col.all_distinct_values for col in self.table.Columns()]
 
@@ -26,7 +27,9 @@ class SpectralEstimator(CardEst):
                 
             sorted_d = np.sort(target_d)
             chunks = np.array_split(sorted_d, max_chunks)
-            chunks = chunks[:len(sorted_d)] # remove empty chunks if len(d) < max_chunks
+            # remove empty chunks if len(d) < max_chunks
+            # also reverse order so that first (where 'nan' is placed) is the smallest length chunk
+            chunks = chunks[:len(sorted_d)][::-1]
             
             print(len(d), c.distribution_size)
             self.col_chunk_map[c] = {}
@@ -57,7 +60,7 @@ class SpectralEstimator(CardEst):
         if len(comps) == 0:
             return [], [], []
         columns, domain_chunks = zip(*comps)
-        vals = [np.random.choice(d) for d in domain_chunks]
+        vals = [self.rng.choice(d) for d in domain_chunks]
         operators = ["="] * len(comps)
         return columns, operators, vals
 
@@ -74,7 +77,7 @@ class SpectralEstimator(CardEst):
 
     def train(self, oracle_est, num_masks=1000, avg_n=1, p=0.2):
         n = len(self.col_val_map)
-        all_masks = np.random.choice(2, size=(num_masks, n), p = np.array([1-p, p])) # p probability of a 1
+        all_masks = self.rng.choice(2, size=(num_masks, n), p = np.array([1-p, p])) # p probability of a 1
         values = []
         for mask in tqdm(all_masks):
             value = 0
