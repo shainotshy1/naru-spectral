@@ -1,6 +1,7 @@
 from estimators import CardEst, OPS
 import numpy as np
 from tqdm import tqdm
+import math
 
 from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, ExactSolver # type:ignore
 
@@ -18,11 +19,17 @@ class SpectralEstimator(CardEst):
         self.col_val_map = {}
         self.inv_col_val_map = {}
         for c,d in zip(self.table.Columns(), column_domains):
-            sorted_d = np.sort(d)
+            if type(d[0]) is float and math.isnan(d[0]):
+                target_d = d[1:]
+            else:
+                target_d = d
+                
+            sorted_d = np.sort(target_d)
             chunks = np.array_split(sorted_d, max_chunks)
             chunks = chunks[:len(sorted_d)] # remove empty chunks if len(d) < max_chunks
+            chunks = [np.array([float('nan')])] + chunks # ALWAYS add 'nan' as its own chunk
             
-            print(len(d), c.distribution_size, d.dtype)
+            print(len(d), c.distribution_size)
             self.col_chunk_map[c] = {}
             for i in range(len(chunks)):
                 idx = len(self.col_val_map)
@@ -30,7 +37,7 @@ class SpectralEstimator(CardEst):
                 self.inv_col_val_map[idx] = (c, chunks[i])
                 for v in chunks[i]:
                     self.col_chunk_map[c][v] = i
-                            
+
     def _query_to_bitmap(self, columns, operators, vals):
         assert all([op == '=' for op in operators]) # Only allow equijoins
         n = len(self.col_val_map)

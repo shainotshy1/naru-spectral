@@ -85,13 +85,17 @@ class Column(object):
         return self
 
     def Fill(self, data_instance, infer_dist=False):
-        assert self.data is None
+        # assert self.data is None
         self.data = data_instance
         # If no distribution is currently specified, then infer distinct values
         # from data.
         if infer_dist:
             self.SetDistribution(self.data)
         return self
+
+    def EnableSubsample(self, indices):
+        if self.data is not None:
+            self.Fill(self.data[indices])
 
     def __repr__(self):
         return 'Column({}, distribution_size={})'.format(
@@ -143,6 +147,14 @@ class Table(object):
         """Returns index of column with the specified name."""
         assert name in self.name_to_index
         return self.name_to_index[name]
+
+    def EnableSubsample(self, max_rows):
+        if max_rows is not None:
+            indices = np.random.choice(np.arange(self.cardinality), size=max_rows, replace=False)
+            for col in self.columns:
+                col.EnableSubsample(indices)
+            
+            self.cardinality = self._validate_cardinality(self.columns)
 
 
 class CsvTable(Table):

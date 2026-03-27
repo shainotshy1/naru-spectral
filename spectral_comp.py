@@ -55,8 +55,7 @@ def gen_query(table, rng, num_filters = 5):
 
     return idxs, ops, vals[idxs]
 
-def MakeMade(scale, cols_to_train, seed, fixed_ordering=None):
-    layers = 4
+def MakeMade(scale, cols_to_train, seed, fixed_ordering=None, column_masking=False, residual=True, layers=4, direct_io=False):
     model = made.MADE(
         nin=len(cols_to_train),
         hidden_sizes=[scale] *
@@ -67,24 +66,35 @@ def MakeMade(scale, cols_to_train, seed, fixed_ordering=None):
         output_encoding='one_hot',
         embed_size=32,
         seed=seed,
-        do_direct_io_connections=False,
+        do_direct_io_connections=direct_io,
         natural_ordering=False if seed is not None and seed != 0 else True,
-        residual_connections=True,
+        residual_connections=residual,
         fixed_ordering=fixed_ordering,
-        column_masking=False,
+        column_masking=column_masking,
     )
 
     return model
 
-def setup_data_model_eval(seed, table_name, target_ckpt, device):
+def setup_data_model_eval(seed, table_name, target_ckpt, device, max_rows=None):
     table = load_data(table_name)
-    
-    model = MakeMade(
-        scale=128,
-        cols_to_train=table.columns,
-        seed=seed,
-        fixed_ordering=None
-    ).to(device)
+
+    if table_name == 'dmv-tiny':
+        model = MakeMade(
+            scale=128,
+            cols_to_train=table.columns,
+            seed=seed,
+            fixed_ordering=None,
+        ).to(device)
+    else:
+        model = MakeMade(
+            scale=256,
+            cols_to_train=table.columns,
+            seed=seed,
+            fixed_ordering=None,
+            column_masking=True,
+            layers=5,
+            direct_io=True
+        ).to(device)
 
     print('Loading ckpt:', target_ckpt)
     model.load_state_dict(torch.load(target_ckpt))
@@ -98,6 +108,9 @@ def setup_data_model_eval(seed, table_name, target_ckpt, device):
     seed = int(z.group(3))
     bits_gap = model_bits - data_bits
 
+    print(f"Subsampling {max_rows} rows")
+    table.EnableSubsample(max_rows)
+
     Ckpt = collections.namedtuple(
         'Ckpt', 'epoch model_bits bits_gap path loaded_model seed')
 
@@ -109,6 +122,7 @@ def setup_data_model_eval(seed, table_name, target_ckpt, device):
                 seed=seed)
     
     psample = 2000
+
     est = estimators_lib.ProgressiveSampling(ckpt.loaded_model,
                                             table,
                                             psample,
@@ -116,7 +130,7 @@ def setup_data_model_eval(seed, table_name, target_ckpt, device):
                                             shortcircuit=False)
     
     est.name = str(est) + '_{}_{:.3f}'.format(ckpt.seed, ckpt.bits_gap)
-    
+
     oracle_est = estimators_lib.Oracle(table)
 
     return table, est, oracle_est
@@ -142,14 +156,14 @@ def print_est(est):
 
 def main():
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print('Device', DEVICE)
 
     seed = 1234
     rng = np.random.RandomState(seed)
 
-    table_name = 'dmv-tiny'
-    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
-    table, naru_est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE)
+    max_rows = None
+    table_name = 'dmv-tiny' #'dmv'
+    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0] #'dmv-7.3MB*'
+    table, naru_est, oracle_est = setup_data_model_eval(seed, table_name, target_ckpt, DEVICE, max_rows=max_rows)
 
     print("Training Spectral")
     num_masks = 1000
