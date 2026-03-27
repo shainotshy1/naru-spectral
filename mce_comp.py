@@ -15,7 +15,7 @@ from scipy.stats import gaussian_kde
 
 import estimators as estimators_lib
 from eval_model import ReportModel, SaveEstimators, RunN, Query
-from spectral_estimator import SpectralEstimator
+from mce_estimator import MCE_Estimator
 
 import warnings
 warnings.filterwarnings(
@@ -51,7 +51,7 @@ def gen_query(table, rng, num_filters = 5):
 
     return idxs, ops, target_vals
 
-def MakeMade(scale, cols_to_train, seed, fixed_ordering=None, column_masking=False, residual=True, layers=4, direct_io=False):
+def MakeMade(scale, cols_to_train, seed=1234, fixed_ordering=None, column_masking=False, residual=True, layers=4, direct_io=False):
     model = made.MADE(
         nin=len(cols_to_train),
         hidden_sizes=[scale] *
@@ -78,14 +78,12 @@ def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None):
         model = MakeMade(
             scale=128,
             cols_to_train=table.columns,
-            seed=0,
             fixed_ordering=None,
         ).to(device)
     else:
         model = MakeMade(
             scale=256,
             cols_to_train=table.columns,
-            seed=0,
             fixed_ordering=None,
             column_masking=True,
             layers=5,
@@ -139,9 +137,9 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_spectral(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2, path='mce_model.txt'):
+def train_mce(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2, path='mce_model.txt'):
     oracle = copy.deepcopy(oracle_est)
-    spec_est = SpectralEstimator(table, rng, max_chunks=max_chunks)
+    spec_est = MCE_Estimator(table, rng, max_chunks=max_chunks)
     if os.path.exists(path):
         spec_est.load_model(path)
         print(f"Loaded model from: {path}")
@@ -165,14 +163,14 @@ def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err
 
     for i, est in enumerate(ests):
         data = getattr(est, target_stat)
-        kde = gaussian_kde(data)
+        kde = gaussian_kde(data, bw_method=0.2)
         x = np.linspace(min(data), max(data), 500)
         plt.fill_between(x, kde(x), alpha=alpha, color=colors[i % len(colors)], label=est.name)
         plt.plot(x, kde(x), color=colors[i % len(colors)], linewidth=1)
 
     plt.title(title)
     plt.xlabel(label)
-    plt.xlim(1, 10)
+    # plt.xlim(1, 1000)
     plt.ylabel("Density")
     plt.legend()
     plt.grid(axis='y', linestyle='--', alpha=0.8)
@@ -200,8 +198,8 @@ def main():
     rng = np.random.RandomState(seed)
 
     max_rows = None
-    table_name = 'dmv-tiny' #'dmv'
-    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0] #'dmv-7.3MB*'
+    table_name = 'dmv' #'dmv'
+    target_ckpt = glob.glob('./models/dmv-7.3MB*.pt')[0] #'dmv-7.3MB*'
     table, naru_est, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows)
     naru_est.name = "Naru"
 
@@ -210,35 +208,53 @@ def main():
     # Masked Cardinality Estimator
     max_chunks = 2
     p = 0.05
-    path=f'models/mce_{table_name}_chunks={max_chunks}.txt'
-    spec_est = train_spectral(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p, path=path)
-    spec_est.name = f"MCE-{num_masks // 1000}k-c{max_chunks}"
+    rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
+    path=f'models/mce_{table_name}_chunks={max_chunks}_rows={rows}.txt'
+    # spec_est = train_mce(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p, path=path)
+    # spec_est.name = f"MCE-{num_masks // 1000}k-c{max_chunks}"
 
-    num_filters = rng.choice(np.arange(3, 8))
-    num_queries = 100
+    num_queries = 1000
     
-    rng = np.random.RandomState(seed + 1) # Reset range to ensure same queries whether or not we train spectral or load from file
+    oracle_path = f'datasets/{table_name}_cards_rows_{rows}_seed_{seed}.npy'
+    preloaded_cards = os.path.exists(oracle_path)
+    if preloaded_cards:
+        print(f"Loading oracle cards from: {oracle_path}")
+        oracle_cards = np.load(oracle_path)
+    else:
+        oracle_cards = []
+
+    rng = np.random.RandomState(seed + 1) # Reset range to ensure same queries whether or not we train MCE or load from file
     print("Evaluating...")
-    for _ in tqdm(range(num_queries)):
+    for i in tqdm(range(num_queries)):
+        num_filters = rng.choice(np.arange(3, 8))
         col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters)
         cols = np.take(table.columns, col_idxs)
-        true_card = oracle_est.Query(cols, ops, vals)
+        
+        if preloaded_cards:
+            true_card = oracle_cards[i]
+        else:
+            true_card = oracle_est.Query(cols, ops, vals)
+            oracle_cards.append(true_card)
 
         query = (cols, ops, vals)
         execute_on_est(naru_est, true_card, query, table, None)
-        execute_on_est(spec_est, true_card, query, table, None)
+        # execute_on_est(spec_est, true_card, query, table, None)
 
-    print_est(spec_est)
+    if not preloaded_cards:
+        np.save(oracle_path, np.array(oracle_cards))
+        print(f"Saved oracle cards to: {oracle_path}")
+
+    # print_est(spec_est)
     print_est(naru_est)
 
     colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_histograms([naru_est, spec_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="Cardinality Error Distributions (DMV-Tiny)", colors=colors)
-    plot_estimators_boxplots([naru_est, spec_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="Cardinality Execution Distributions (DMV-Tiny)")
+    plot_estimators_histograms([naru_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="Cardinality Error Distributions (DMV-Tiny)", colors=colors)
+    plot_estimators_boxplots([naru_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="Cardinality Execution Distributions (DMV-Tiny)")
 
     # Cherry pick outliers (slowest MCE is faster than the fastest Naru)
 
     SaveEstimators("results_naru.csv", [naru_est])
-    SaveEstimators("results_spec.csv", [spec_est])
+    # SaveEstimators("results_spec.csv", [spec_est])
     print('...Done')
 
 if __name__ == "__main__":

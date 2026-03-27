@@ -5,10 +5,10 @@ import math
 import lightgbm as lgb
 from sklearn.model_selection import GridSearchCV
 
-class SpectralEstimator(CardEst):
+class MCE_Estimator(CardEst):
     def __init__(self, table, rng, max_chunks=2):
-        super(SpectralEstimator, self).__init__()
-        self.name = 'SpectralEst'
+        super(MCE_Estimator, self).__init__()
+        self.name = 'MCE-Estimator'
         self.model = None
         self.cv_r2 = None
         self.table = table
@@ -109,7 +109,7 @@ class SpectralEstimator(CardEst):
         self.model = best_model
         self.cv_r2 = cv_r2
 
-        print(f"Spectal Training R2: {cv_r2}")
+        print(f"R2: {cv_r2}")
 
         return cv_r2
     
