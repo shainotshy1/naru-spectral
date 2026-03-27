@@ -2,8 +2,8 @@ from estimators import CardEst, OPS
 import numpy as np
 from tqdm import tqdm
 import math
-
-from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, ExactSolver # type:ignore
+import lightgbm as lgb
+from sklearn.model_selection import GridSearchCV
 
 class SpectralEstimator(CardEst):
     def __init__(self, table, rng, max_chunks=2):
@@ -87,10 +87,35 @@ class SpectralEstimator(CardEst):
                 value += (1/avg_n) * c
             values.append(value)
         values = np.array(values)
-        best_model, cv_r2 = lgboost_fit(all_masks, values)
+
+        model = lgb.LGBMRegressor(verbose=-1, n_jobs=4)
+
+        # Define the hyperparameter grid
+        param_grid = {
+            'num_leaves': [31,50],
+            'learning_rate': [0.01, 0.1],
+            'max_depth': [4,6]
+        }
+
+        # Perform GridSearchCV
+        grid_search = GridSearchCV(
+            model, param_grid=param_grid, # type: ignore
+            cv=5, scoring='r2', verbose=0
+        )
+
+        grid_search.fit(all_masks, values)
+        best_model, cv_r2 = grid_search.best_estimator_, grid_search.best_score_
+
         self.model = best_model
         self.cv_r2 = cv_r2
 
         print(f"Spectal Training R2: {cv_r2}")
 
         return cv_r2
+    
+    def save_model(self, path):
+        assert self.model is not None
+        self.model.booster_.save_model(path) # type: ignore
+
+    def load_model(self, path):
+        self.model = lgb.Booster(model_file=path)
