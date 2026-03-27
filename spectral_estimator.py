@@ -27,7 +27,6 @@ class SpectralEstimator(CardEst):
             sorted_d = np.sort(target_d)
             chunks = np.array_split(sorted_d, max_chunks)
             chunks = chunks[:len(sorted_d)] # remove empty chunks if len(d) < max_chunks
-            chunks = [np.array([float('nan')])] + chunks # ALWAYS add 'nan' as its own chunk
             
             print(len(d), c.distribution_size)
             self.col_chunk_map[c] = {}
@@ -37,6 +36,8 @@ class SpectralEstimator(CardEst):
                 self.inv_col_val_map[idx] = (c, chunks[i])
                 for v in chunks[i]:
                     self.col_chunk_map[c][v] = i
+            # ALWAYS add 'nan' in first chunk
+            self.col_chunk_map[c][float('nan')] = 0
 
     def _query_to_bitmap(self, columns, operators, vals):
         assert all([op == '=' for op in operators]) # Only allow equijoins
