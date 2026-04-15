@@ -538,52 +538,72 @@ class Oracle(CardEst):
         assert len(columns) == len(operators) == len(vals)
         self.OnStart()
 
-        if self.count_distinct:
-            if len(columns) == 0:
-                return 0
-            
-            target_cols = set()
-            for c, o, v in zip(columns, operators, vals):
-                target_cols.add(c) # Remove repeats
-            
-            arr = np.stack([c.data for c in columns], axis=1).astype(str)
-            c = np.unique(arr, axis=0).shape[0]
-            
-            return c
-        else:
-            bools = None
-            col_ops_vals = {} # Impose OR on all operators on the same column
-            for c, o, v in zip(columns, operators, vals):
-                if c not in col_ops_vals:
-                    col_ops_vals[c] = []
-                col_ops_vals[c].append((o, v))
-
-            for c, ov_lst in col_ops_vals.items():
-                inds = None
-                for o,v in ov_lst:
-                    if self.limit_first_n is None:
-                        inds_n = OPS[o](c.data, v)
-                    else:
-                        # For data shifts experiment.
-                        inds_n = OPS[o](c.data[:self.limit_first_n], v)
-                    
-                    if inds is None:
-                        inds = inds_n
-                    else:
-                        inds |= inds_n
-                if bools is None:
-                    bools = inds
-                else:
-                    bools &= inds
-
-            if bools is not None:
-                c = bools.sum()
+        bools = None
+        for c, o, v in zip(columns, operators, vals):
+            if self.limit_first_n is None:
+                inds = OPS[o](c.data, v)
             else:
-                c = self.table.cardinality
-            self.OnEnd()
-            if return_masks:
-                return bools
-            return c
+                # For data shifts experiment.
+                inds = OPS[o](c.data[:self.limit_first_n], v)
+
+            if bools is None:
+                bools = inds
+            else:
+                bools &= inds
+        c = bools.sum() # type: ignore
+        self.OnEnd()
+        if return_masks:
+            return bools
+        return c
+
+
+        # if self.count_distinct:
+        #     if len(columns) == 0:
+        #         return 0
+            
+        #     target_cols = set()
+        #     for c, o, v in zip(columns, operators, vals):
+        #         target_cols.add(c) # Remove repeats
+            
+        #     arr = np.stack([c.data for c in columns], axis=1).astype(str)
+        #     c = np.unique(arr, axis=0).shape[0]
+            
+        #     return c
+        # else:
+
+        # bools = None
+        # col_ops_vals = {} # Impose OR on all operators on the same column
+        # for c, o, v in zip(columns, operators, vals):
+        #     if c not in col_ops_vals:
+        #         col_ops_vals[c] = []
+        #     col_ops_vals[c].append((o, v))
+
+        # for c, ov_lst in col_ops_vals.items():
+        #     inds = None
+        #     for o,v in ov_lst:
+        #         if self.limit_first_n is None:
+        #             inds_n = OPS[o](c.data, v)
+        #         else:
+        #             # For data shifts experiment.
+        #             inds_n = OPS[o](c.data[:self.limit_first_n], v)
+                
+        #         if inds is None:
+        #             inds = inds_n
+        #         else:
+        #             inds |= inds_n
+        #     if bools is None:
+        #         bools = inds
+        #     else:
+        #         bools &= inds
+
+        #     if bools is not None:
+        #         c = bools.sum()
+        #     else:
+        #         c = self.table.cardinality
+        #     self.OnEnd()
+        #     if return_masks:
+        #         return bools
+        #     return c
 
 
 class QueryRegionSize(CardEst):

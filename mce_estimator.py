@@ -11,7 +11,7 @@ from sklearn.model_selection import GridSearchCV
 import pickle
 
 class MCE_Estimator(CardEst):
-    def __init__(self, table, rng, max_chunks=2, linear=False):
+    def __init__(self, table, rng, linear=False):
         super(MCE_Estimator, self).__init__()
         self.name = 'MDCE' if not linear else 'Lasso'
         self.model = None
@@ -20,79 +20,85 @@ class MCE_Estimator(CardEst):
         self.rng = rng
         self.linear = linear
 
-        column_domains = [col.all_distinct_values for col in self.table.Columns()]
+        # Count distinct of strings - how? Use sentiment score to approximate the value so it can be passed to the GBT
+        # IDEA: How to do cardinality estimation with string arguments? Use sentiment analysis as input rather than the string themselves
+        # Limitations: GBTs are powerful but this work is limited by its assumption of the data being floats. How can we deal with string data?
 
-        self.col_chunk_map = {}
-        self.col_val_map = {}
-        self.inv_col_val_map = {}
-        for c,d in zip(self.table.Columns(), column_domains):
-            if type(d[0]) is float and math.isnan(d[0]):
-                target_d = d[1:]
-            else:
-                target_d = d
-                
-            sorted_d = np.sort(target_d)
-            chunks = np.array_split(sorted_d, max_chunks)
-            # remove empty chunks if len(d) < max_chunks
-            # also reverse order so that first (where 'nan' is placed) is the smallest length chunk
-            chunks = chunks[:len(sorted_d)][::-1]
-            
-            print(len(d), c.distribution_size)
-            self.col_chunk_map[c] = {}
-            for i in range(len(chunks)):
-                idx = len(self.col_val_map)
-                self.col_val_map[(c, i)] = idx
-                self.inv_col_val_map[idx] = (c, chunks[i])
-                for v in chunks[i]:
-                    self.col_chunk_map[c][v] = i
-            # ALWAYS add 'nan' in first chunk
-            self.col_chunk_map[c][float('nan')] = 0
+        print("Setting up structures...", end="", flush=True)
 
-    def _query_to_bitmap(self, columns, operators, vals):
-        assert all([op == '=' for op in operators]) # Only allow equijoins
-        n = len(self.col_val_map)
-        bitmap = np.zeros(n)
-        for c,v in zip(columns, vals):
-            if type(v) is float and math.isnan(v):
-                i = 0 # ALWAYS 'nan' in first chunk
-            else:
-                i = self.col_chunk_map[c][v]
-            bitmap[self.col_val_map[(c, i)]] = 1
-        return bitmap
+        ops_allowed = ['=', '>=', '<=']
+        self.op_code_len = int(np.ceil(np.log2(len(ops_allowed))))
+        self.op_map = {op : tuple([int(bit) for bit in format(i, '08b')][:self.op_code_len]) for i, op in enumerate(ops_allowed)}
+        self.inv_op_map = {tuple([int(bit) for bit in format(i, '08b')][:self.op_code_len]) : op for i, op in enumerate(ops_allowed)}
+
+        self.col_map = {}
+        self.inv_col_map = {}
+        for c in self.table.Columns():
+            idx = len(self.col_map)
+            self.col_map[c] = idx
+            self.inv_col_map[idx] = c
+
+        self.val_map = {}
+        self.inv_val_map = {}
+        for c in self.table.Columns():
+            val_map = {}
+            inv_map = {}
+            self.val_map[c] = val_map
+            self.inv_val_map[c] = inv_map
+            for v in c.all_distinct_values:
+                idx = len(val_map)
+                val_map[v] = idx
+                inv_map[idx] = v
+
+        print("Done!")
+
+    def _query_to_vec(self, columns, operators, vals):
+        assert all([op in self.op_map or op == 'null' for op in operators])
+        n = len(self.col_map)
+        v_len = n + n * self.op_code_len + n # selected columns + opcodes per columns + predicate value
+        vec = np.zeros(v_len)
+        for c, op, v in zip(columns, operators, vals):
+            col_idx = self.col_map[c]
+            vec[col_idx] = 1
+            if op != 'null':
+                op_idx = n + self.op_code_len * col_idx
+                val_idx = n * (1 + self.op_code_len) + col_idx
+                vec[op_idx : op_idx + self.op_code_len] = self.op_map[op]
+                vec[val_idx] = self.val_map[c][v]
+        return vec
     
-    def _bitmap_to_query(self, bitmap):
-        # Only allow equijoins
-        comps = [self.inv_col_val_map[i] for i,b in enumerate(bitmap) if b == 1]
-        if len(comps) == 0:
+    def _vec_to_query(self, vec):
+        n = len(self.col_map)
+        col_indexes = [i for i in range(n) if vec[i] == 1]
+        if len(col_indexes) == 0:
             return [], [], []
-        columns, domain_chunks = zip(*comps)
-        vals = [self.rng.choice(d) for d in domain_chunks]
-        operators = ["="] * len(comps)
-        return columns, operators, vals
+        cols = [self.inv_col_map[i] for i in col_indexes]
+        ops = [self.inv_op_map[tuple(vec[n + self.op_code_len * i:n + self.op_code_len * (i+1)])] for i in col_indexes]
+        v_offset = n * (1 + self.op_code_len)
+        vals = [self.inv_val_map[cols[i]][vec[v_offset + i]] for i in col_indexes]
+        
+        return cols, ops, vals
 
     def Query(self, columns, operators, vals):
         assert len(columns) == len(operators) == len(vals)
         assert self.model is not None, "Must train model first!"
-        mask = self._query_to_bitmap(columns, operators, vals)
+        mask = self._query_to_vec(columns, operators, vals)
 
         self.OnStart()
         c = self.model.predict(mask.reshape(1, -1)) # type: ignore
         self.OnEnd()
 
-        return np.maximum(np.round(c[0]), 1)
+        return np.maximum(np.round(c[0]), 1) # type: ignore
 
-    def train(self, oracle_est, num_masks=1000, avg_n=1, p=0.2):
-        n = len(self.col_val_map)
-        all_masks = self.rng.choice(2, size=(num_masks, n), p = np.array([1-p, p])) # p probability of a 1
-        values = []
-        for mask in tqdm(all_masks):
-            value = 0
-            for _ in range(avg_n):
-                cols, ops, vals = self._bitmap_to_query(mask)
-                c = oracle_est.Query(cols, ops, vals)
-                value += (1/avg_n) * c
-            values.append(value)
-        values = np.array(values)
+    def train(self, queries, cardinalities):
+        n = len(self.col_map)
+        query_vecs = []
+        for (cols, ops, vals) in queries:
+            vec = self._query_to_vec(cols, ops, vals)
+            query_vecs.append(vec)
+
+        query_vecs = np.array(query_vecs)
+        vals = np.array(cardinalities)
     
         if self.linear:
             model = Lasso(max_iter=10000)
@@ -113,17 +119,17 @@ class MCE_Estimator(CardEst):
             model = lgb.LGBMRegressor(verbose=-1, n_jobs=4)
 
             # Define the hyperparameter grid
-            # param_grid = {
-            #     'num_leaves': [31,50],
-            #     'learning_rate': [0.01, 0.1],
-            #     'max_depth': [4,6]
-            # }
-            
             param_grid = {
-                'max_depth': [3, 5, None],
-                'n_estimators': [500, 1000, 5000],
-                'learning_rate': [0.01, 0.1]
+                'num_leaves': [31,50],
+                'learning_rate': [0.01, 0.1],
+                'max_depth': [4,6]
             }
+            
+            # param_grid = {
+            #     'max_depth': [3, 5, None],
+            #     'n_estimators': [500, 1000, 5000],
+            #     'learning_rate': [0.01, 0.1]
+            # }
 
             # Perform GridSearchCV
             grid_search = GridSearchCV(
@@ -149,7 +155,7 @@ class MCE_Estimator(CardEst):
             # )
             # self.linear = True
 
-        grid_search.fit(all_masks, values)
+        grid_search.fit(query_vecs, vals)
         self.model, self.cv_r2 = grid_search.best_estimator_, grid_search.best_score_
 
         print(f"R2: {self.cv_r2}")

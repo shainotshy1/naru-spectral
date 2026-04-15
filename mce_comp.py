@@ -43,7 +43,7 @@ def gen_query(table, rng, num_filters = 5, nan_check=False):
     target_vals = [float('nan')]
     while any([type(v) is float and math.isnan(v) for v in target_vals]):
         idxs = rng.choice(len(table.columns), replace=False, size=num_filters)
-        ops = rng.choice(['='], size=num_filters) # , ">=", "<="
+        ops = rng.choice(['=', ">=", "<="], size=num_filters) # add 'null' filter
         ops_all_eqs = ['='] * num_filters
         sensible_to_do_range = [table.columns[i].DistributionSize() >= 10 for i in idxs]
         ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
@@ -149,7 +149,7 @@ def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None, g
 
     oracle_est = estimators_lib.Oracle(table, count_distinct=True)
 
-    return table, est, oracle_est
+    return table, oracle_est, est
 
 def execute_on_est(est, true_card, query, table, oracle_est):
     Query([est],
@@ -159,17 +159,12 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_mce(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2, path='mce_model.txt', linear=False):
-    oracle = copy.deepcopy(oracle_est)
-    spec_est = MCE_Estimator(table, rng, max_chunks=max_chunks, linear=linear)
-    if os.path.exists(path):
-        spec_est.load_model(path)
-        print(f"Loaded model from: {path}")
-    else:
-        print("Training model...")
-        spec_est.train(oracle, num_masks=num_masks, avg_n=avg_n, p=p)
-        spec_est.save_model(path)
-        print(f"Saved model to: {path}")
+def train_mce(rng, queries, cardinalities, table, path='mce_model.txt', linear=False):
+    spec_est = MCE_Estimator(table, rng, linear=linear)
+    print("Training model...")
+    spec_est.train(queries, cardinalities)
+    spec_est.save_model(path)
+    print(f"Saved model to: {path}")
     return spec_est
 
 def print_est(est, attribute='errs'):
@@ -213,68 +208,82 @@ def plot_estimators_boxplots(ests, filename="boxplots.png", target_stat='err', t
     plt.savefig(filename, dpi=300)
     plt.close()
 
+def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num_train, num_valid, recollect_data=False):
+    total_num = num_train + num_valid
+    queries = []
+
+    oracle_path = f'datasets/{table_name}_cards_rows={max_rows}_n={total_num}_seed={seed}.npy'
+    preloaded_cards = not recollect_data and os.path.exists(oracle_path)
+    if preloaded_cards:
+        print(f"Loading oracle cards from: {oracle_path}")
+        cardinalities = np.load(oracle_path)
+    else:
+        cardinalities = []
+    
+    for i in tqdm(range(total_num)):
+        num_filters = rng.choice(np.arange(1, len(table.columns) + 1))
+        col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters, nan_check=False)
+        cols = np.take(table.columns, col_idxs)
+        query = (cols, ops, vals)
+
+        if preloaded_cards:
+            true_card = cardinalities[i]
+        else:
+            true_card = oracle_est.Query(cols, ops, vals)
+            cardinalities.append(true_card)
+        queries.append(query)
+
+    if not preloaded_cards:
+        np.save(oracle_path, np.array(cardinalities))
+        print(f"Saved oracle cards to: {oracle_path}")
+
+    train = (queries[:num_train], cardinalities[:num_train])
+    valid = (queries[num_train:], cardinalities[num_train:])
+
+    return train, valid
+
 def main():
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     seed = 286
     rng = np.random.RandomState(seed)
+    
+    recollect_data = False
+    retrain_model = True
 
-    max_rows = 1000000
-    table_name = 'dmv'
+    num_train = 50000
+    num_valid = 10000
+
+    max_rows = 1000
+    table_name = 'dmv-tiny'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
-    table, naru_est, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
+    table, oracle_est, _ = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
 
-    linear = False
-    # num_masks = 80
-    avg_n = 1
-    max_chunks = 1
-    p = 0.5
-    # while num_masks < 400:
-    for num_masks in [115]:
-        print("Number of masks:", num_masks)
-        path=f'models/mce_{table_name}_chunks={max_chunks}_rows={max_rows}_masks={num_masks}_p={p}_seed={seed}_linear={linear}'
-        path += '.pkl' if linear else '.txt'
-        spec_est = train_mce(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p, path=path, linear=linear)
-        spec_est.name = f"MDCE-{num_masks}-c{max_chunks}"
-        num_masks = round(num_masks * 1.2)
+    linear = True
+    test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data)
+    path = f'models/mce_{table_name}_rows={rows}_seed={seed}_linear={linear}'
+    path += '.pkl' if linear else '.txt'
+    if not retrain_model and os.path.exists(path):
+        spec_est = MCE_Estimator(table, rng, linear=linear)
+        spec_est.load_model(path)
+        print(f"Loaded model from: {path}")
+    else:
+        test_q, test_c = test_data
+        spec_est = train_mce(rng, test_q, test_c, table, path=path, linear=linear)
+    spec_est.name = f"MCE"
 
-        num_queries = 1000
+    print("Evaluating...")
+    valid_q, valid_c = valid_data
+    for i in tqdm(range(num_valid)):
+        query, true_card = valid_q[i], valid_c[i]
+        execute_on_est(spec_est, true_card, query, table, None)
 
-        oracle_path = f'datasets/{table_name}_cards_rows_{rows}_seed_{seed}_queries_{num_queries}.npy'
-        preloaded_cards = os.path.exists(oracle_path)
-        if preloaded_cards:
-            print(f"Loading oracle cards from: {oracle_path}")
-            oracle_cards = np.load(oracle_path)
-        else:
-            oracle_cards = []
+    print_est(spec_est, attribute='errs')
+    print_est(spec_est, attribute='query_dur_ms')
 
-        rng = np.random.RandomState(seed + 1) # Reset range to ensure same queries whether or not we train MCE or load from file
-        print("Evaluating...")
-        for i in tqdm(range(num_queries)):
-            num_filters = rng.choice(np.arange(1, len(table.columns) + 1))
-            col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters, nan_check=False)
-            cols = np.take(table.columns, col_idxs)
-
-            if preloaded_cards:
-                true_card = oracle_cards[i]
-            else:
-                true_card = oracle_est.Query(cols, ops, vals)
-                oracle_cards.append(true_card)
-
-            query = (cols, ops, vals)
-            execute_on_est(spec_est, true_card, query, table, None)
-
-        if not preloaded_cards:
-            np.save(oracle_path, np.array(oracle_cards))
-            print(f"Saved oracle cards to: {oracle_path}")
-
-        print(f"[{num_masks}]", end=' ')
-        print_est(spec_est, attribute='errs')
-        print_est(spec_est, attribute='query_dur_ms')
-
-    colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_histograms([spec_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="", colors=colors)
+    # colors = ['#C877E3', '#7796E3', '#B8EB9D']
+    plot_estimators_boxplots([spec_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="")
     plot_estimators_boxplots([spec_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
 
     SaveEstimators("results_spec.csv", [spec_est])
