@@ -249,15 +249,15 @@ def main():
     rng = np.random.RandomState(seed)
     
     recollect_data = False
-    retrain_model = True
+    retrain_model = False
 
     num_train = 10000
     num_valid = 1000
 
     max_rows = 100000
-    table_name = 'dmv'
+    table_name = 'dmv-tiny'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
-    table, oracle_est, _ = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
+    table, oracle_est, naru_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
 
     linear = False
