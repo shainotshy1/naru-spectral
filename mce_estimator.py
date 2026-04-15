@@ -1,18 +1,24 @@
+from matplotlib.pyplot import clf
+from sklearn.linear_model import Lasso
+from sklearn.ensemble import RandomForestRegressor
+
 from estimators import CardEst, OPS
 import numpy as np
 from tqdm import tqdm
 import math
 import lightgbm as lgb
 from sklearn.model_selection import GridSearchCV
+import pickle
 
 class MCE_Estimator(CardEst):
-    def __init__(self, table, rng, max_chunks=2):
+    def __init__(self, table, rng, max_chunks=2, linear=False):
         super(MCE_Estimator, self).__init__()
-        self.name = 'MCE-Estimator'
+        self.name = 'MDCE' if not linear else 'Lasso'
         self.model = None
         self.cv_r2 = None
         self.table = table
         self.rng = rng
+        self.linear = linear
 
         column_domains = [col.all_distinct_values for col in self.table.Columns()]
 
@@ -87,35 +93,80 @@ class MCE_Estimator(CardEst):
                 value += (1/avg_n) * c
             values.append(value)
         values = np.array(values)
+    
+        if self.linear:
+            model = Lasso(max_iter=10000)
 
-        model = lgb.LGBMRegressor(verbose=-1, n_jobs=4)
+            # Define hyperparameter grid for Lasso
+            param_grid = {
+                'alpha': [1e-4, 1e-3, 1e-2, 1e-1, 1, 10]
+            }
 
-        # Define the hyperparameter grid
-        param_grid = {
-            'num_leaves': [31,50],
-            'learning_rate': [0.01, 0.1],
-            'max_depth': [4,6]
-        }
+            grid_search = GridSearchCV(
+                model,
+                param_grid=param_grid,
+                cv=5,
+                scoring='r2',
+                verbose=0
+            )
+        else:
+            model = lgb.LGBMRegressor(verbose=-1, n_jobs=4)
 
-        # Perform GridSearchCV
-        grid_search = GridSearchCV(
-            model, param_grid=param_grid, # type: ignore
-            cv=5, scoring='r2', verbose=0
-        )
+            # Define the hyperparameter grid
+            # param_grid = {
+            #     'num_leaves': [31,50],
+            #     'learning_rate': [0.01, 0.1],
+            #     'max_depth': [4,6]
+            # }
+            
+            param_grid = {
+                'max_depth': [3, 5, None],
+                'n_estimators': [500, 1000, 5000],
+                'learning_rate': [0.01, 0.1]
+            }
+
+            # Perform GridSearchCV
+            grid_search = GridSearchCV(
+                model, param_grid=param_grid, # type: ignore
+                cv=5, scoring='r2', verbose=0
+            )
+            # model = RandomForestRegressor(random_state=42, n_jobs=1)
+
+            # # Simpler hyperparameter grid
+            # param_grid = {
+            #     'n_estimators': [100, 200],
+            #     'max_depth': [4, 6],
+            #     'min_samples_split': [2, 5]
+            # }
+
+            # grid_search = GridSearchCV(
+            #     model,
+            #     param_grid=param_grid,
+            #     cv=5,
+            #     scoring='r2',
+            #     verbose=0,
+            #     njobs=4
+            # )
+            # self.linear = True
 
         grid_search.fit(all_masks, values)
-        best_model, cv_r2 = grid_search.best_estimator_, grid_search.best_score_
+        self.model, self.cv_r2 = grid_search.best_estimator_, grid_search.best_score_
 
-        self.model = best_model
-        self.cv_r2 = cv_r2
+        print(f"R2: {self.cv_r2}")
 
-        print(f"R2: {cv_r2}")
-
-        return cv_r2
+        return self.cv_r2
     
     def save_model(self, path):
-        assert self.model is not None
-        self.model.booster_.save_model(path) # type: ignore
+        assert self.model is not None, 'Must train model first!'
+        if self.linear:
+            with open(path,'wb') as f:
+                pickle.dump(self.model,f)
+        else:
+            self.model.booster_.save_model(path) # type: ignore
 
     def load_model(self, path):
-        self.model = lgb.Booster(model_file=path)
+        if self.linear:
+            with open(path, 'rb') as f:
+                self.model = pickle.load(f)
+        else:
+            self.model = lgb.Booster(model_file=path)

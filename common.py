@@ -241,6 +241,7 @@ class CsvTable(Table):
             col.SetDistribution(data[c].value_counts(dropna=False).index.values)
             columns.append(col)
         print('done, took {:.1f}s'.format(time.time() - s))
+        print("NUMBER OF COLUMNS: ", len(columns))
         return columns
 
 

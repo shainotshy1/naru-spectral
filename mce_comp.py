@@ -34,7 +34,7 @@ def load_data(ds_name):
 
     return table
 
-def gen_query(table, rng, num_filters = 5):
+def gen_query(table, rng, num_filters = 5, nan_check=False):
     s = table.data.iloc[rng.randint(0, table.cardinality)]
     vals = s.values
     vals[6] = vals[6].to_datetime64()
@@ -48,6 +48,8 @@ def gen_query(table, rng, num_filters = 5):
         sensible_to_do_range = [table.columns[i].DistributionSize() >= 10 for i in idxs]
         ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
         target_vals = vals[idxs]
+        if not nan_check:
+            break
 
     return idxs, ops, target_vals
 
@@ -71,77 +73,81 @@ def MakeMade(scale, cols_to_train, seed=1234, fixed_ordering=None, column_maskin
 
     return model
 
-def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None):
+def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None, get_naru=False):
     table = load_data(table_name)
 
-    if table_name == 'dmv-tiny':
-        column_masking = False
-        model = MakeMade(
-            scale=128,
-            cols_to_train=table.columns,
-            fixed_ordering=None,
-            column_masking=column_masking
-        ).to(device)
-    elif target_ckpt.split('/')[-1].startswith('dmv-7.3MB'):
-        column_masking = True
-        model = MakeMade(
-            scale=256,
-            cols_to_train=table.columns,
-            fixed_ordering=None,
-            column_masking=column_masking,
-            layers=5,
-            direct_io=True
-        ).to(device)
-    elif target_ckpt.split('/')[-1].startswith('dmv-19.8MB'):
-        column_masking = True
-        model = MakeMade(
-            scale=128,
-            cols_to_train=table.columns,
-            fixed_ordering=None,
-            column_masking=column_masking,
-            layers=0,
-            direct_io=True,
-            residual=False
-        ).to(device)
+    if get_naru:
+        if table_name == 'dmv-tiny':
+            column_masking = False
+            model = MakeMade(
+                scale=128,
+                cols_to_train=table.columns,
+                fixed_ordering=None,
+                column_masking=column_masking
+            ).to(device)
+        elif target_ckpt.split('/')[-1].startswith('dmv-7.3MB'):
+            column_masking = True
+            model = MakeMade(
+                scale=256,
+                cols_to_train=table.columns,
+                fixed_ordering=None,
+                column_masking=column_masking,
+                layers=5,
+                direct_io=True
+            ).to(device)
+        elif target_ckpt.split('/')[-1].startswith('dmv-19.8MB'):
+            column_masking = True
+            model = MakeMade(
+                scale=128,
+                cols_to_train=table.columns,
+                fixed_ordering=None,
+                column_masking=column_masking,
+                layers=0,
+                direct_io=True,
+                residual=False
+            ).to(device)
+        else:
+            raise ValueError(f"Unsupported checkpoint: {target_ckpt}")
+        
+        print('Loading ckpt:', target_ckpt)
+        model.load_state_dict(torch.load(target_ckpt))
+        model.eval()
+
+        z = re.match('.+model([\d\.]+)-data([\d\.]+).+seed([\d\.]+).*.pt',target_ckpt)
+        print(target_ckpt)
+        assert z
+        model_bits = float(z.group(1))
+        data_bits = float(z.group(2))
+        seed = int(z.group(3))
+        bits_gap = model_bits - data_bits
+
+        Ckpt = collections.namedtuple(
+            'Ckpt', 'epoch model_bits bits_gap path loaded_model seed')
+
+        ckpt = Ckpt(path=target_ckpt,
+                    epoch=None,
+                    model_bits=model_bits,
+                    bits_gap=bits_gap,
+                    loaded_model=model,
+                    seed=seed)
+        
+        psample = 2000
+
+        est = estimators_lib.ProgressiveSampling(ckpt.loaded_model,
+                                                table,
+                                                psample,
+                                                device=device,
+                                                shortcircuit=column_masking)
+        
+        # est.name = str(est) + '_{}_{:.3f}'.format(ckpt.seed, ckpt.bits_gap)
+        est.name = "Naru" 
     else:
-        raise ValueError(f"Unsupported checkpoint: {target_ckpt}")
-
-    print('Loading ckpt:', target_ckpt)
-    model.load_state_dict(torch.load(target_ckpt))
-    model.eval()
-
-    z = re.match('.+model([\d\.]+)-data([\d\.]+).+seed([\d\.]+).*.pt',target_ckpt)
-    print(target_ckpt)
-    assert z
-    model_bits = float(z.group(1))
-    data_bits = float(z.group(2))
-    seed = int(z.group(3))
-    bits_gap = model_bits - data_bits
+        est = None
 
     print(f"Subsampling {max_rows} rows")
     table.EnableSubsample(max_rows, rng)
 
-    Ckpt = collections.namedtuple(
-        'Ckpt', 'epoch model_bits bits_gap path loaded_model seed')
-
-    ckpt = Ckpt(path=target_ckpt,
-                epoch=None,
-                model_bits=model_bits,
-                bits_gap=bits_gap,
-                loaded_model=model,
-                seed=seed)
-    
-    psample = 2000
-
-    est = estimators_lib.ProgressiveSampling(ckpt.loaded_model,
-                                            table,
-                                            psample,
-                                            device=device,
-                                            shortcircuit=column_masking)
-    
-    est.name = str(est) + '_{}_{:.3f}'.format(ckpt.seed, ckpt.bits_gap)
-
-    oracle_est = estimators_lib.Oracle(table)
+    oracle_est = estimators_lib.Oracle(table, count_distinct=True)
 
     return table, est, oracle_est
 
@@ -153,9 +159,9 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_mce(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2, path='mce_model.txt'):
+def train_mce(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0.2, path='mce_model.txt', linear=False):
     oracle = copy.deepcopy(oracle_est)
-    spec_est = MCE_Estimator(table, rng, max_chunks=max_chunks)
+    spec_est = MCE_Estimator(table, rng, max_chunks=max_chunks, linear=linear)
     if os.path.exists(path):
         spec_est.load_model(path)
         print(f"Loaded model from: {path}")
@@ -166,10 +172,10 @@ def train_mce(rng, oracle_est, table, num_masks=1000, avg_n=1, max_chunks=2, p=0
         print(f"Saved model to: {path}")
     return spec_est
 
-def print_est(est):
-    print(est.name, 'max', np.round(np.max(est.errs), 3), '99th',
-               np.round(np.quantile(est.errs, 0.99), 3), '95th', np.round(np.quantile(est.errs, 0.95), 3),
-              'median', np.round(np.quantile(est.errs, 0.5), 3), 'mean', np.round(np.mean(est.errs), 3))
+def print_est(est, attribute='errs'):
+    print(est.name, 'max', np.round(np.max(getattr(est, attribute)), 3), '99th',
+               np.round(np.quantile(getattr(est, attribute), 0.99), 3), '95th', np.round(np.quantile(getattr(est, attribute), 0.95), 3),
+              'median', np.round(np.quantile(getattr(est, attribute), 0.5), 3), 'mean', np.round(np.mean(getattr(est, attribute)), 3))
 
 def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err', title="", label='', alpha=0.4, colors=None):
     plt.figure(figsize=(8, 6))
@@ -179,7 +185,7 @@ def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err
 
     for i, est in enumerate(ests):
         data = getattr(est, target_stat)
-        kde = gaussian_kde(data, bw_method=0.2)
+        kde = gaussian_kde(data, bw_method=0.05)
         x = np.linspace(min(data), max(data), 500)
         plt.fill_between(x, kde(x), alpha=alpha, color=colors[i % len(colors)], label=est.name)
         plt.plot(x, kde(x), color=colors[i % len(colors)], linewidth=1)
@@ -213,64 +219,65 @@ def main():
     seed = 286
     rng = np.random.RandomState(seed)
 
-    max_rows = None
+    max_rows = 1000000
     table_name = 'dmv'
-    target_ckpt = glob.glob('./models/dmv-19.8MB*.pt')[0]
-    table, naru_est, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows)
-    naru_est.name = "Naru"
-
-    num_masks = 1000
-    avg_n = 10
-    # Masked Cardinality Estimator
-    max_chunks = 2
-    p = 0.05
+    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
+    table, naru_est, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
-    path=f'models/mce_{table_name}_chunks={max_chunks}_rows={rows}_masks={num_masks // 1000}k.txt'
-    # spec_est = train_mce(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p, path=path)
-    # spec_est.name = f"MCE-{num_masks // 1000}k-c{max_chunks}"
 
-    num_queries = 1000
-    
-    oracle_path = f'datasets/{table_name}_cards_rows_{rows}_seed_{seed}_queries_{num_queries}.npy'
-    preloaded_cards = os.path.exists(oracle_path)
-    if preloaded_cards:
-        print(f"Loading oracle cards from: {oracle_path}")
-        oracle_cards = np.load(oracle_path)
-    else:
-        oracle_cards = []
+    linear = False
+    # num_masks = 80
+    avg_n = 1
+    max_chunks = 1
+    p = 0.5
+    # while num_masks < 400:
+    for num_masks in [115]:
+        print("Number of masks:", num_masks)
+        path=f'models/mce_{table_name}_chunks={max_chunks}_rows={max_rows}_masks={num_masks}_p={p}_seed={seed}_linear={linear}'
+        path += '.pkl' if linear else '.txt'
+        spec_est = train_mce(rng, oracle_est, table, num_masks=num_masks, avg_n=avg_n, max_chunks=max_chunks, p=p, path=path, linear=linear)
+        spec_est.name = f"MDCE-{num_masks}-c{max_chunks}"
+        num_masks = round(num_masks * 1.2)
 
-    rng = np.random.RandomState(seed + 1) # Reset range to ensure same queries whether or not we train MCE or load from file
-    print("Evaluating...")
-    for i in tqdm(range(num_queries)):
-        num_filters = rng.choice(np.arange(3, 8))
-        col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters)
-        cols = np.take(table.columns, col_idxs)
-        
+        num_queries = 1000
+
+        oracle_path = f'datasets/{table_name}_cards_rows_{rows}_seed_{seed}_queries_{num_queries}.npy'
+        preloaded_cards = os.path.exists(oracle_path)
         if preloaded_cards:
-            true_card = oracle_cards[i]
+            print(f"Loading oracle cards from: {oracle_path}")
+            oracle_cards = np.load(oracle_path)
         else:
-            true_card = oracle_est.Query(cols, ops, vals)
-            oracle_cards.append(true_card)
+            oracle_cards = []
 
-        query = (cols, ops, vals)
-        execute_on_est(naru_est, true_card, query, table, None)
-        # execute_on_est(spec_est, true_card, query, table, None)
+        rng = np.random.RandomState(seed + 1) # Reset range to ensure same queries whether or not we train MCE or load from file
+        print("Evaluating...")
+        for i in tqdm(range(num_queries)):
+            num_filters = rng.choice(np.arange(1, len(table.columns) + 1))
+            col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters, nan_check=False)
+            cols = np.take(table.columns, col_idxs)
 
-    if not preloaded_cards:
-        np.save(oracle_path, np.array(oracle_cards))
-        print(f"Saved oracle cards to: {oracle_path}")
+            if preloaded_cards:
+                true_card = oracle_cards[i]
+            else:
+                true_card = oracle_est.Query(cols, ops, vals)
+                oracle_cards.append(true_card)
 
-    # print_est(spec_est)
-    print_est(naru_est)
+            query = (cols, ops, vals)
+            execute_on_est(spec_est, true_card, query, table, None)
+
+        if not preloaded_cards:
+            np.save(oracle_path, np.array(oracle_cards))
+            print(f"Saved oracle cards to: {oracle_path}")
+
+        print(f"[{num_masks}]", end=' ')
+        print_est(spec_est, attribute='errs')
+        print_est(spec_est, attribute='query_dur_ms')
 
     colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_histograms([naru_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="", colors=colors)
-    plot_estimators_boxplots([naru_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
+    plot_estimators_histograms([spec_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="", colors=colors)
+    plot_estimators_boxplots([spec_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
 
-    # Cherry pick outliers (slowest MCE is faster than the fastest Naru)
-
-    SaveEstimators("results_naru.csv", [naru_est])
-    # SaveEstimators("results_spec.csv", [spec_est])
+    SaveEstimators("results_spec.csv", [spec_est])
     print('...Done')
 
 if __name__ == "__main__":
