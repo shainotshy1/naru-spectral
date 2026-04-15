@@ -221,7 +221,7 @@ def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num
         cardinalities = []
     
     for i in tqdm(range(total_num)):
-        num_filters = rng.choice(np.arange(1, len(table.columns) + 1))
+        num_filters = rng.choice(np.arange(3, 8))#rng.choice(np.arange(1, len(table.columns) + 1))
         col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters, nan_check=False)
         cols = np.take(table.columns, col_idxs)
         query = (cols, ops, vals)
@@ -251,16 +251,16 @@ def main():
     recollect_data = False
     retrain_model = True
 
-    num_train = 50000
-    num_valid = 10000
+    num_train = 10000
+    num_valid = 1000
 
-    max_rows = 1000
-    table_name = 'dmv-tiny'
+    max_rows = 100000
+    table_name = 'dmv'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
     table, oracle_est, _ = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
 
-    linear = True
+    linear = False
     test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data)
     path = f'models/mce_{table_name}_rows={rows}_seed={seed}_linear={linear}'
     path += '.pkl' if linear else '.txt'
@@ -278,6 +278,24 @@ def main():
     for i in tqdm(range(num_valid)):
         query, true_card = valid_q[i], valid_c[i]
         execute_on_est(spec_est, true_card, query, table, None)
+    
+    print("Example encoding:")
+    ex_idx = 0
+    cols, ops, vals = valid_q[ex_idx]
+    true_card = valid_c[ex_idx]
+    print("    Query:")
+    for c,op,v in zip(cols, ops, vals):
+        print(f"     {c.name} {str(op)} {v}")
+
+    ex_vec = spec_est._query_to_vec(cols, ops, vals,)
+    print(f"    Encoding: {ex_vec}")
+    inv_cols, inv_ops, inv_vals = spec_est._vec_to_query(ex_vec)
+    print("    Inverse: ")
+    for c,op,v in zip(inv_cols, inv_ops, inv_vals):
+        print(f"     {c.name} {str(op)} {v}")
+        
+    print(f"    Cardinality: {true_card}")
+    print(f"    Prediction: {spec_est.Query(cols, ops, vals, store=False)}")
 
     print_est(spec_est, attribute='errs')
     print_est(spec_est, attribute='query_dur_ms')

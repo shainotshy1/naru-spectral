@@ -28,8 +28,8 @@ class MCE_Estimator(CardEst):
 
         ops_allowed = ['=', '>=', '<=']
         self.op_code_len = int(np.ceil(np.log2(len(ops_allowed))))
-        self.op_map = {op : tuple([int(bit) for bit in format(i, '08b')][:self.op_code_len]) for i, op in enumerate(ops_allowed)}
-        self.inv_op_map = {tuple([int(bit) for bit in format(i, '08b')][:self.op_code_len]) : op for i, op in enumerate(ops_allowed)}
+        self.op_map = {op : tuple([int(bit) for bit in format(i, '08b')][-self.op_code_len:]) for i, op in enumerate(ops_allowed)}
+        self.inv_op_map = {tuple([int(bit) for bit in format(i, '08b')][-self.op_code_len:]) : op for i, op in enumerate(ops_allowed)}
 
         self.col_map = {}
         self.inv_col_map = {}
@@ -50,13 +50,14 @@ class MCE_Estimator(CardEst):
                 val_map[v] = idx
                 inv_map[idx] = v
 
-        print("Done!")
+        n = len(self.col_map)
+        print(f"Done! Total vector lengths: [{n + n * self.op_code_len + n}]")
 
     def _query_to_vec(self, columns, operators, vals):
         assert all([op in self.op_map or op == 'null' for op in operators])
         n = len(self.col_map)
         v_len = n + n * self.op_code_len + n # selected columns + opcodes per columns + predicate value
-        vec = np.zeros(v_len)
+        vec = np.zeros(v_len, dtype=int)
         for c, op, v in zip(columns, operators, vals):
             col_idx = self.col_map[c]
             vec[col_idx] = 1
@@ -75,20 +76,20 @@ class MCE_Estimator(CardEst):
         cols = [self.inv_col_map[i] for i in col_indexes]
         ops = [self.inv_op_map[tuple(vec[n + self.op_code_len * i:n + self.op_code_len * (i+1)])] for i in col_indexes]
         v_offset = n * (1 + self.op_code_len)
-        vals = [self.inv_val_map[cols[i]][vec[v_offset + i]] for i in col_indexes]
+        vals = [self.inv_val_map[c][int(vec[v_offset + i])] for i, c in zip(col_indexes, cols)]
         
         return cols, ops, vals
 
-    def Query(self, columns, operators, vals):
+    def Query(self, columns, operators, vals, store=True):
         assert len(columns) == len(operators) == len(vals)
         assert self.model is not None, "Must train model first!"
         mask = self._query_to_vec(columns, operators, vals)
 
-        self.OnStart()
+        if store: self.OnStart()
         c = self.model.predict(mask.reshape(1, -1)) # type: ignore
-        self.OnEnd()
+        if store: self.OnEnd()
 
-        return np.maximum(np.round(c[0]), 1) # type: ignore
+        return int(np.maximum(np.round(c[0]), 0)) # type: ignore
 
     def train(self, queries, cardinalities):
         n = len(self.col_map)
