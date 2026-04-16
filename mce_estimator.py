@@ -106,7 +106,7 @@ class MCE_Estimator(CardEst):
 
             # Define hyperparameter grid for Lasso
             param_grid = {
-                'alpha': [1e-4, 1e-3, 1e-2, 1e-1, 1, 10]
+                'alpha': [1e-4, 1e-3, 1e-2, 1e-1, 1]
             }
 
             grid_search = GridSearchCV(
@@ -121,9 +121,9 @@ class MCE_Estimator(CardEst):
 
             # Define the hyperparameter grid
             param_grid = {
-                'num_leaves': [31,50],
+                'num_leaves': [30,50,100],
                 'learning_rate': [0.01, 0.1],
-                'max_depth': [4,6]
+                'max_depth': [4,6, None]
             }
             
             # param_grid = {

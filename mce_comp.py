@@ -242,6 +242,24 @@ def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num
 
     return train, valid
 
+def gen_card_model(linear, retrain_model, table, table_name, rows, seed, rng, test_data):
+    path = f'models/mce_{table_name}_rows={rows}_seed={seed}_linear={linear}'
+    path += '.pkl' if linear else '.txt'
+    if not retrain_model and os.path.exists(path):
+        spec_est = MCE_Estimator(table, rng, linear=linear)
+        spec_est.load_model(path)
+        print(f"Loaded model from: {path}")
+    else:
+        test_q, test_c = test_data
+        spec_est = train_mce(rng, test_q, test_c, table, path=path, linear=linear)
+
+    if linear:
+        spec_est.name = "MCE-Linear"
+    else:
+        spec_est.name = "MCE-GBT"
+
+    return spec_est
+
 def main():
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
@@ -254,57 +272,66 @@ def main():
     num_train = 10000
     num_valid = 1000
 
-    max_rows = 100000
+    target_algs = ["naru", "gbt", "linear"]
+    test_ests = []
+    get_naru = "naru" in target_algs
+
+    max_rows = None
     table_name = 'dmv-tiny'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
-    table, oracle_est, naru_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=False)
+    table, oracle_est, naru_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=get_naru)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
 
-    linear = False
+    if get_naru:
+        test_ests.append(naru_est)
+
     test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data)
-    path = f'models/mce_{table_name}_rows={rows}_seed={seed}_linear={linear}'
-    path += '.pkl' if linear else '.txt'
-    if not retrain_model and os.path.exists(path):
-        spec_est = MCE_Estimator(table, rng, linear=linear)
-        spec_est.load_model(path)
-        print(f"Loaded model from: {path}")
-    else:
-        test_q, test_c = test_data
-        spec_est = train_mce(rng, test_q, test_c, table, path=path, linear=linear)
-    spec_est.name = f"MCE"
+    
+    if "linear" in target_algs:
+        lin_est = gen_card_model(True, retrain_model, table, table_name, rows, seed, rng, test_data)
+        test_ests.append(lin_est)
+    if "gbt" in target_algs:
+        gbt_est = gen_card_model(False, retrain_model, table, table_name, rows, seed, rng, test_data)
+        test_ests.append(gbt_est)
 
     print("Evaluating...")
     valid_q, valid_c = valid_data
     for i in tqdm(range(num_valid)):
         query, true_card = valid_q[i], valid_c[i]
-        execute_on_est(spec_est, true_card, query, table, None)
+        for est in test_ests:
+            execute_on_est(est, true_card, query, table, None)
     
-    print("Example encoding:")
-    ex_idx = 0
-    cols, ops, vals = valid_q[ex_idx]
-    true_card = valid_c[ex_idx]
-    print("    Query:")
-    for c,op,v in zip(cols, ops, vals):
-        print(f"     {c.name} {str(op)} {v}")
+    if "gbt" in target_algs:
+        spec_est = test_ests[target_algs.index("gbt")]
+        print("Example encoding:")
+        ex_idx = 0
+        cols, ops, vals = valid_q[ex_idx]
+        true_card = valid_c[ex_idx]
+        print("    Query:")
+        for c,op,v in zip(cols, ops, vals):
+            print(f"     {c.name} {str(op)} {v}")
 
-    ex_vec = spec_est._query_to_vec(cols, ops, vals,)
-    print(f"    Encoding: {ex_vec}")
-    inv_cols, inv_ops, inv_vals = spec_est._vec_to_query(ex_vec)
-    print("    Inverse: ")
-    for c,op,v in zip(inv_cols, inv_ops, inv_vals):
-        print(f"     {c.name} {str(op)} {v}")
-        
-    print(f"    Cardinality: {true_card}")
-    print(f"    Prediction: {spec_est.Query(cols, ops, vals, store=False)}")
+        ex_vec = spec_est._query_to_vec(cols, ops, vals,)
+        print(f"    Encoding: {ex_vec}")
+        inv_cols, inv_ops, inv_vals = spec_est._vec_to_query(ex_vec)
+        print("    Inverse: ")
+        for c,op,v in zip(inv_cols, inv_ops, inv_vals):
+            print(f"     {c.name} {str(op)} {v}")
+            
+        print(f"    Cardinality: {true_card}")
+        print(f"    Prediction: {spec_est.Query(cols, ops, vals, store=False)}")
 
-    print_est(spec_est, attribute='errs')
-    print_est(spec_est, attribute='query_dur_ms')
+    for est in test_ests:  
+        print(f"---{est.name}---")
+        print_est(est, attribute='errs')
+        print_est(est, attribute='query_dur_ms')
+        print()
 
-    # colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_boxplots([spec_est], filename="fig_err.png", target_stat='errs', label='Estimation Error', title="")
-    plot_estimators_boxplots([spec_est], filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
+    colors = ['#C877E3', '#7796E3', '#B8EB9D']
+    plot_estimators_boxplots(test_ests, filename="fig_err.png", target_stat='errs', label='Estimation Error', title="")
+    plot_estimators_boxplots(test_ests, filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
 
-    SaveEstimators("results_spec.csv", [spec_est])
+    # SaveEstimators("results_spec.csv", [spec_est])
     print('...Done')
 
 if __name__ == "__main__":
