@@ -224,9 +224,6 @@ def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num
 
     oracle_path = f'datasets/{table_name}_cards_rows={max_rows}_n={total_num}_seed={seed}.npy'
     preloaded_cards = not recollect_data and os.path.exists(oracle_path)
-    if preloaded_cards:
-        print(f"Loading oracle cards from: {oracle_path}")
-        cardinalities = np.load(oracle_path)
     
     queries = []
     for _ in tqdm(range(total_num)):
@@ -238,9 +235,11 @@ def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num
         queries.append(query)
 
     n = len(queries)
-    cardinalities = np.zeros(n)
 
-    if not preloaded_cards:
+    if preloaded_cards:
+        print(f"Loading oracle cards from: {oracle_path}")
+        cardinalities = np.load(oracle_path)
+    else:
         print("Calculating Cardinalities...")
         start = time.time()
 
@@ -292,11 +291,11 @@ def main():
     seed = 286
     rng = np.random.RandomState(seed)
     
-    recollect_data = True
-    retrain_model = True
+    recollect_data = False
+    retrain_model = False
 
     num_train = 10000
-    num_valid = 100
+    num_valid = 1000
 
     target_algs = ["naru", "gbt", "linear"]
     test_ests = []
