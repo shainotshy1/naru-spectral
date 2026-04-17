@@ -17,6 +17,9 @@ import estimators as estimators_lib
 from eval_model import ReportModel, SaveEstimators, RunN, Query
 from mce_estimator import MCE_Estimator
 
+import time
+from multiprocessing import Pool
+
 import warnings
 warnings.filterwarnings(
     "ignore",
@@ -168,7 +171,7 @@ def train_mce(rng, queries, cardinalities, table, path='mce_model.txt', linear=F
     return spec_est
 
 def print_est(est, attribute='errs'):
-    print(est.name, 'max', np.round(np.max(getattr(est, attribute)), 3), '99th',
+    print('max', np.round(np.max(getattr(est, attribute)), 3), '99th',
                np.round(np.quantile(getattr(est, attribute), 0.99), 3), '95th', np.round(np.quantile(getattr(est, attribute), 0.95), 3),
               'median', np.round(np.quantile(getattr(est, attribute), 0.5), 3), 'mean', np.round(np.mean(getattr(est, attribute)), 3))
 
@@ -187,7 +190,6 @@ def plot_estimators_histograms(ests, filename="histograms.png", target_stat='err
 
     plt.title(title)
     plt.xlabel(label)
-    # plt.xlim(1, 25)
     plt.ylabel("Density")
     plt.legend(fontsize=14)
     plt.grid(axis='y', linestyle='--', alpha=0.8)
@@ -208,32 +210,56 @@ def plot_estimators_boxplots(ests, filename="boxplots.png", target_stat='err', t
     plt.savefig(filename, dpi=300)
     plt.close()
 
-def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num_train, num_valid, recollect_data=False):
+def compute_cardinalities_chunk(args):
+    queries_chunk, oracle_est = args
+    oracle = copy.deepcopy(oracle_est)
+    
+    results = []
+    for cols, ops, vals in tqdm(queries_chunk):
+        results.append(oracle.Query(cols, ops, vals))
+    return results
+
+def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num_train, num_valid, recollect_data=False, num_threads=4):
     total_num = num_train + num_valid
-    queries = []
 
     oracle_path = f'datasets/{table_name}_cards_rows={max_rows}_n={total_num}_seed={seed}.npy'
     preloaded_cards = not recollect_data and os.path.exists(oracle_path)
     if preloaded_cards:
         print(f"Loading oracle cards from: {oracle_path}")
         cardinalities = np.load(oracle_path)
-    else:
-        cardinalities = []
     
-    for i in tqdm(range(total_num)):
+    queries = []
+    for _ in tqdm(range(total_num)):
         num_filters = rng.choice(np.arange(3, 8))#rng.choice(np.arange(1, len(table.columns) + 1))
         col_idxs, ops, vals = gen_query(table, rng, num_filters=num_filters, nan_check=False)
         cols = np.take(table.columns, col_idxs)
         query = (cols, ops, vals)
 
-        if preloaded_cards:
-            true_card = cardinalities[i]
-        else:
-            true_card = oracle_est.Query(cols, ops, vals)
-            cardinalities.append(true_card)
         queries.append(query)
 
+    n = len(queries)
+    cardinalities = np.zeros(n)
+
     if not preloaded_cards:
+        print("Calculating Cardinalities...")
+        start = time.time()
+
+        stride = (n + num_threads - 1) // num_threads
+        chunks = [
+            queries[i:i+stride]
+            for i in range(0, n, stride)
+        ]
+
+        with Pool(num_threads) as pool:
+            results = pool.map(
+                compute_cardinalities_chunk,
+                [(chunk, oracle_est) for chunk in chunks]
+            )
+
+        cardinalities = np.concatenate([np.array(r) for r in results])
+
+        print(f"All processes complete! [{time.time() - start} secs.]")
+
         np.save(oracle_path, np.array(cardinalities))
         print(f"Saved oracle cards to: {oracle_path}")
 
@@ -266,11 +292,11 @@ def main():
     seed = 286
     rng = np.random.RandomState(seed)
     
-    recollect_data = False
-    retrain_model = False
+    recollect_data = True
+    retrain_model = True
 
     num_train = 10000
-    num_valid = 1000
+    num_valid = 100
 
     target_algs = ["naru", "gbt", "linear"]
     test_ests = []
@@ -285,7 +311,8 @@ def main():
     if get_naru:
         test_ests.append(naru_est)
 
-    test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data)
+    num_threads = 16
+    test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
     
     if "linear" in target_algs:
         lin_est = gen_card_model(True, retrain_model, table, table_name, rows, seed, rng, test_data)
