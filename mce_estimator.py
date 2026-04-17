@@ -10,15 +10,19 @@ import lightgbm as lgb
 from sklearn.model_selection import GridSearchCV
 import pickle
 
+from sklearn.metrics import make_scorer
+
 class MCE_Estimator(CardEst):
-    def __init__(self, table, rng, linear=False):
+    def __init__(self, table, rng, method="gbt"):
+        assert method in ["gbt", "linear", "forest"]
         super(MCE_Estimator, self).__init__()
-        self.name = 'MDCE' if not linear else 'Lasso'
+
+        self.method = method
+        self.name = "MCE-" + self.method.upper()
         self.model = None
         self.cv_r2 = None
         self.table = table
         self.rng = rng
-        self.linear = linear
 
         # Count distinct of strings - how? Use sentiment score to approximate the value so it can be passed to the GBT
         # IDEA: How to do cardinality estimation with string arguments? Use sentiment analysis as input rather than the string themselves
@@ -91,6 +95,14 @@ class MCE_Estimator(CardEst):
 
         return int(np.maximum(np.round(c[0]), 0)) # type: ignore
 
+    def _q_error(self, y_true, y_pred):
+        eps = 1e-10
+        y_true = np.maximum(y_true, eps)
+        y_pred = np.maximum(y_pred, eps)
+
+        q = np.maximum(y_pred / y_true, y_true / y_pred)
+        return np.median(q)
+
     def train(self, queries, cardinalities):
         n = len(self.col_map)
         query_vecs = []
@@ -98,82 +110,85 @@ class MCE_Estimator(CardEst):
             vec = self._query_to_vec(cols, ops, vals)
             query_vecs.append(vec)
 
-        query_vecs = np.array(query_vecs)
-        vals = np.array(cardinalities)
+        query_vecs = np.array(query_vecs, dtype=int)
+        vals = np.array(cardinalities, dtype=int)
+
+        scoring = {
+            'r2': 'r2',
+            'q_error': make_scorer(self._q_error, greater_is_better=False)
+        }
+
+        targ_score = 'q_error'
     
-        if self.linear:
+        if self.method == "linear":
             model = Lasso(max_iter=10000)
 
-            # Define hyperparameter grid for Lasso
             param_grid = {
-                'alpha': [1e-4, 1e-3, 1e-2, 1e-1, 1]
+                'alpha': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
             }
 
             grid_search = GridSearchCV(
                 model,
                 param_grid=param_grid,
                 cv=5,
-                scoring='r2',
+                scoring=scoring,
+                refit=targ_score,
                 verbose=0
             )
-        else:
+        elif self.method == "gbt":
             model = lgb.LGBMRegressor(verbose=-1, n_jobs=4)
 
-            # Define the hyperparameter grid
             param_grid = {
-                'num_leaves': [30,50,100],
+                'num_leaves': [30, 50, 100],
                 'learning_rate': [0.01, 0.1],
-                'max_depth': [4,6, None]
+                'max_depth': [3, 5, None],
+                'lambda_l1': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
             }
             
-            # param_grid = {
-            #     'max_depth': [3, 5, None],
-            #     'n_estimators': [500, 1000, 5000],
-            #     'learning_rate': [0.01, 0.1]
-            # }
-
-            # Perform GridSearchCV
             grid_search = GridSearchCV(
-                model, param_grid=param_grid, # type: ignore
-                cv=5, scoring='r2', verbose=0
+                model, # type: ignore
+                param_grid=param_grid,
+                cv=5, 
+                scoring=scoring, 
+                refit=targ_score,
+                verbose=0
             )
-            # model = RandomForestRegressor(random_state=42, n_jobs=1)
+        elif self.method == "forest":
+            model = RandomForestRegressor(verbose=0, n_jobs=4)
 
-            # # Simpler hyperparameter grid
-            # param_grid = {
-            #     'n_estimators': [100, 200],
-            #     'max_depth': [4, 6],
-            #     'min_samples_split': [2, 5]
-            # }
+            param_grid = {
+                'n_estimators': [10, 50, 100],#[10, 20, 30],
+                'max_depth': [3, 5, None]
+            }
 
-            # grid_search = GridSearchCV(
-            #     model,
-            #     param_grid=param_grid,
-            #     cv=5,
-            #     scoring='r2',
-            #     verbose=0,
-            #     njobs=4
-            # )
-            # self.linear = True
-
+            grid_search = GridSearchCV(
+                model,
+                param_grid=param_grid,
+                cv=5,
+                scoring=scoring,
+                refit=targ_score
+            )
+        else:
+            raise ValueError("Unsupported method type: ", self.method)
+            
         grid_search.fit(query_vecs, vals)
         self.model, self.cv_r2 = grid_search.best_estimator_, grid_search.best_score_
 
-        print(f"R2: {self.cv_r2}")
+        print(f"{targ_score}: {self.cv_r2}")
 
         return self.cv_r2
     
     def save_model(self, path):
         assert self.model is not None, 'Must train model first!'
-        if self.linear:
+        if self.method == "gbt":
+            self.model.booster_.save_model(path) # type: ignore
+        else:
             with open(path,'wb') as f:
                 pickle.dump(self.model,f)
-        else:
-            self.model.booster_.save_model(path) # type: ignore
 
     def load_model(self, path):
-        if self.linear:
+        if self.method == "gbt":
+            self.model = lgb.Booster(model_file=path)
+        else:
             with open(path, 'rb') as f:
                 self.model = pickle.load(f)
-        else:
-            self.model = lgb.Booster(model_file=path)

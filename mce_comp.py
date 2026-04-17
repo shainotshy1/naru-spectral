@@ -162,8 +162,8 @@ def execute_on_est(est, true_card, query, table, oracle_est):
         table=table,
         oracle_est=oracle_est)
 
-def train_mce(rng, queries, cardinalities, table, path='mce_model.txt', linear=False):
-    spec_est = MCE_Estimator(table, rng, linear=linear)
+def train_mce(rng, queries, cardinalities, table, path='mce_model.txt', method="gbt"):
+    spec_est = MCE_Estimator(table, rng, method=method)
     print("Training model...")
     spec_est.train(queries, cardinalities)
     spec_est.save_model(path)
@@ -267,21 +267,16 @@ def get_train_valid_data(rng, table, table_name, oracle_est, max_rows, seed, num
 
     return train, valid
 
-def gen_card_model(linear, retrain_model, table, table_name, rows, seed, rng, test_data):
-    path = f'models/mce_{table_name}_rows={rows}_seed={seed}_linear={linear}'
-    path += '.pkl' if linear else '.txt'
+def gen_card_model(method, retrain_model, table, table_name, rows, seed, training_size, rng, test_data):
+    path = f'models/mce_{table_name}_rows={rows}_seed={seed}_method={method}_samples={training_size}'
+    path += '.pkl' if method == "gbt" else '.txt'
     if not retrain_model and os.path.exists(path):
-        spec_est = MCE_Estimator(table, rng, linear=linear)
+        spec_est = MCE_Estimator(table, rng, method=method)
         spec_est.load_model(path)
         print(f"Loaded model from: {path}")
     else:
         test_q, test_c = test_data
-        spec_est = train_mce(rng, test_q, test_c, table, path=path, linear=linear)
-
-    if linear:
-        spec_est.name = "MCE-Linear"
-    else:
-        spec_est.name = "MCE-GBT"
+        spec_est = train_mce(rng, test_q, test_c, table, path=path, method=method)
 
     return spec_est
 
@@ -294,16 +289,16 @@ def main():
     recollect_data = False
     retrain_model = False
 
-    num_train = 10000
-    num_valid = 1000
+    num_train = 100000
+    num_valid = 5000
 
-    target_algs = ["naru", "gbt", "linear"]
+    target_algs = ["gbt", "forest", "linear"]
     test_ests = []
     get_naru = "naru" in target_algs
 
     max_rows = None
-    table_name = 'dmv-tiny'
-    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
+    table_name = 'dmv'
+    target_ckpt = glob.glob('./models/dmv-7.3MB*.pt')[0]
     table, oracle_est, naru_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=get_naru)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
 
@@ -313,12 +308,11 @@ def main():
     num_threads = 16
     test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
     
-    if "linear" in target_algs:
-        lin_est = gen_card_model(True, retrain_model, table, table_name, rows, seed, rng, test_data)
-        test_ests.append(lin_est)
-    if "gbt" in target_algs:
-        gbt_est = gen_card_model(False, retrain_model, table, table_name, rows, seed, rng, test_data)
-        test_ests.append(gbt_est)
+    for method in target_algs:
+        if method != "naru":
+            print(f"Generating {method.upper()} Estimator...")
+            est = gen_card_model(method, retrain_model, table, table_name, rows, seed, num_train, rng, test_data)
+            test_ests.append(est)
 
     print("Evaluating...")
     valid_q, valid_c = valid_data
