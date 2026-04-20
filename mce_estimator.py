@@ -20,7 +20,7 @@ class MCE_Estimator(CardEst):
         self.method = method
         self.name = "MCE-" + self.method.upper()
         self.model = None
-        self.cv_r2 = None
+        self.score = None
         self.table = table
         self.rng = rng
 
@@ -157,7 +157,7 @@ class MCE_Estimator(CardEst):
             model = RandomForestRegressor(verbose=0, n_jobs=4)
 
             param_grid = {
-                'n_estimators': [10, 50, 100],#[10, 20, 30],
+                'n_estimators': [10, 20, 30],
                 'max_depth': [3, 5, None]
             }
 
@@ -172,11 +172,11 @@ class MCE_Estimator(CardEst):
             raise ValueError("Unsupported method type: ", self.method)
             
         grid_search.fit(query_vecs, vals)
-        self.model, self.cv_r2 = grid_search.best_estimator_, grid_search.best_score_
+        self.model, self.score = grid_search.best_estimator_, grid_search.best_score_
 
-        print(f"{targ_score}: {self.cv_r2}")
+        print(f"{targ_score}: {self.score}")
 
-        return self.cv_r2
+        return self.score
     
     def save_model(self, path):
         assert self.model is not None, 'Must train model first!'

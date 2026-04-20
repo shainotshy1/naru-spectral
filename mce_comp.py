@@ -289,16 +289,16 @@ def main():
     recollect_data = False
     retrain_model = False
 
-    num_train = 100000
-    num_valid = 5000
+    num_train = 10000
+    num_valid = 1000
 
-    target_algs = ["gbt", "forest", "linear"]
+    target_algs = ["naru", "forest", "gbt", "linear"]
     test_ests = []
     get_naru = "naru" in target_algs
-
+# IDEA: Fit the GBT, and then prune coefficients to make sparse representation for fast run-time
     max_rows = None
-    table_name = 'dmv'
-    target_ckpt = glob.glob('./models/dmv-7.3MB*.pt')[0]
+    table_name = 'dmv-tiny'
+    target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
     table, oracle_est, naru_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=get_naru)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
 
