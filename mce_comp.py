@@ -312,7 +312,7 @@ def main():
         test_ests.append(naru_est)
 
     num_threads = 16
-    train_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
+    # train_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
     
     # for method in target_algs:
     #     if method != "naru" and method != "ind":
@@ -341,7 +341,7 @@ def main():
     # print("Example query encoding:", ex_encoding)
 
 
-    query_finder.train(ind_est, train_data[0], expand_n=1)
+    query_finder.train(rng, ind_est, num_train, expand_n=1)
     benchmark_queries = query_finder.generate(num_queries=5, max_spec_order=None)
 
     print("Evaluating benchmark queries...")

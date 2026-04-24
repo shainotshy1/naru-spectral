@@ -8,7 +8,7 @@ from sklearn.model_selection import GridSearchCV
 from tqdm import tqdm
 import lightgbm as lgb
 from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, ExactSolver
-
+import math
 
 class QueryFinder:
     def __init__(self, table, baseline_estimator, num_val_chunks=5):
@@ -76,6 +76,29 @@ class QueryFinder:
 
         return cardinalities
 
+    def _rand_query(self, rng, nan_check=False):
+        num_filters = rng.randint(1, min(15, len(self.table.columns) + 1))
+        s = self.table.data.iloc[rng.randint(0, self.table.cardinality)]
+        vals = s.values
+        vals[6] = vals[6].to_datetime64()
+        idxs = []
+        ops = []
+        target_vals = [float('nan')]
+        while any([type(v) is float and math.isnan(v) for v in target_vals]):
+            idxs = rng.choice(len(self.table.columns), replace=False, size=num_filters)
+            ops = rng.choice(['=', ">=", "<="], size=num_filters) # add 'null' filter
+            ops_all_eqs = ['='] * num_filters
+            sensible_to_do_range = [self.table.columns[i].DistributionSize() >= 10 for i in idxs]
+            ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
+            target_vals = vals[idxs]
+            if not nan_check:
+                break
+
+        cols = np.take(self.table.columns, idxs)
+        query = (cols, ops, target_vals)
+
+        return query
+
     def _encode(self, query):
         # encode a query as a vector of features for the estimator
         ops_allowed = ["=", "<=", ">="]
@@ -125,16 +148,18 @@ class QueryFinder:
 
         return queries
 
-    def train(self, targ_estimator, init_queries, expand_n=5):
+    def train(self, rng, targ_estimator, num_queries, expand_n=5):
         encodings = []
         queries = []
         prefix_sum = [0]
-        for i, query in tqdm(enumerate(init_queries), desc="Expanding training queries"):
-            encoding = self._encode(query)
-            
+        for i in tqdm(range(num_queries), desc="Generating training queries"):
+            init_query = self._rand_query(rng)
+            encoding = self._encode(init_query)
             query_expansion = self._rand_decode(encoding, n=expand_n)
+            
             encodings.append(encoding)
             queries.extend(query_expansion)
+            
             prefix_sum.append(prefix_sum[-1] + len(query_expansion))
 
         print("Computing baseline cardinalities...")
@@ -150,7 +175,7 @@ class QueryFinder:
         q_errors = np.maximum(cards, true_cards) / np.minimum(cards, true_cards)
 
         avg_q_errors = []
-        for i in range(len(init_queries)):
+        for i in range(num_queries):
             start, end = prefix_sum[i], prefix_sum[i+1]
             avg_q_error = np.mean(q_errors[start:end])
             avg_q_errors.append(avg_q_error)
@@ -175,21 +200,6 @@ class QueryFinder:
             n_jobs=1
         )
 
-
-        # self.model = Lasso(max_iter=10000)
-
-        # param_grid = {
-        #     'alpha': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
-        # }
-
-        # grid_search = GridSearchCV(
-        #     self.model,
-        #     param_grid=param_grid,
-        #     cv=5,
-        #     scoring='r2',
-        #     verbose=0
-        # )
-            
         grid_search.fit(X, y)
         self.model, self.score = grid_search.best_estimator_, grid_search.best_score_
 
@@ -202,24 +212,10 @@ class QueryFinder:
         fourier_dict = lgboost_to_fourier(self.model)
 
         sorted_fourier = sorted(fourier_dict.items(), key=lambda item: abs(item[1]), reverse=True)
-        fourier_dict_trunc = dict(sorted_fourier[:1000])
+        fourier_dict_trunc = dict(sorted_fourier[:2000])
 
         exact_solver.load_fourier_dictionary(fourier_dict_trunc)
         best_encoding = np.array(exact_solver.solve())
-
-        # a = np.array(self.model.coef_.flatten().tolist())
-        # # b = self.model.intercept_
-        # best_encoding = np.zeros_like(a, dtype=int)
-
-        # if max_spec_order is None:
-        #     best_encoding[a > 0] = 1
-        # else:
-        #     best_indices = np.argpartition(a, -max_spec_order)[-max_spec_order:]
-        #     best_encoding[best_indices] = 1
-        #     best_encoding[a <= 0] = 0
-
-        # print(best_encoding, type(best_encoding), best_encoding.shape)
-        # print("Expected score: ", self.model.predict(best_encoding.reshape(1, -1))[0])
         
         print("Decoding maximizing query encoding...")
         queries = self._rand_decode(best_encoding, n=num_queries)
