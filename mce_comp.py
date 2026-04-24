@@ -36,8 +36,10 @@ def load_data(ds_name):
     assert ds_name in ['dmv-tiny', 'dmv']
     if ds_name == 'dmv-tiny':
         table = datasets.LoadDmv('dmv-tiny.csv')
+        table.name = 'dmv-tiny'
     elif ds_name == 'dmv':
         table = datasets.LoadDmv()
+        table.name = 'dmv'
     else:
         raise ValueError(f"Unsupported dataset: {ds_name}")
 
@@ -295,7 +297,7 @@ def main():
     recollect_data = False
     retrain_model = False
 
-    num_train = 10000
+    num_train = 5000
     num_valid = 0
 
     target_algs = ["ind"] #, "linear"] # , "forest", "gbt", "linear"
@@ -341,8 +343,8 @@ def main():
     # print("Example query encoding:", ex_encoding)
 
 
-    query_finder.train(rng, ind_est, num_train, expand_n=1)
-    benchmark_queries = query_finder.generate(num_queries=5, max_spec_order=None)
+    query_finder.train(seed, ind_est, num_train, expand_n=5)
+    benchmark_queries = query_finder.generate(rng, num_queries=5, max_spec_order=None)
 
     print("Evaluating benchmark queries...")
     true_cards = query_finder._compute_cardinalities(benchmark_queries, query_finder.baseline_estimator, num_threads=1)

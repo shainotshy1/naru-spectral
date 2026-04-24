@@ -1,4 +1,5 @@
 from multiprocessing.pool import Pool
+import os
 
 from matplotlib.pyplot import clf
 import numpy as np
@@ -15,6 +16,7 @@ class QueryFinder:
         self.table = table
         self.baseline_estimator = baseline_estimator
 
+        self.num_val_chunks = num_val_chunks
         self.col_range_map = {}
         self.val_map = {}
         self.inv_val_map = {}
@@ -25,7 +27,7 @@ class QueryFinder:
             self.val_map[c.name] = val_map
             self.inv_val_map[c.name] = inv_map
 
-            num_chunks = min(num_val_chunks, len(c.all_distinct_values))
+            num_chunks = min(self.num_val_chunks, len(c.all_distinct_values))
             chunk_size = (len(c.all_distinct_values) + num_chunks - 1) // num_chunks
                 
             prev_curr = curr_idx + 1
@@ -118,9 +120,9 @@ class QueryFinder:
 
         return vec
 
-    def _rand_decode(self, encoding, n):
+    def _rand_decode(self, rng, encoding, n):
         assert len(encoding) == self.encoding_length
-        queries = []
+        queries = set()
         for _ in range(n):
             columns, operators, vals = [], [], []
             for col_name, (start, end) in self.col_range_map.items():
@@ -139,31 +141,44 @@ class QueryFinder:
                         vals_lst = self.inv_val_map[col_name][idxs[0]]
                         op = ">="
 
-                    v = np.random.choice(vals_lst)
+                    v = rng.choice(vals_lst)
                     columns.append(c)
                     operators.append(op)
                     vals.append(v)
 
-            queries.append((columns, operators, vals))
+            queries.add((tuple(columns), tuple(operators), tuple(vals)))
+
+        queries = list(queries)
 
         return queries
 
-    def train(self, rng, targ_estimator, num_queries, expand_n=5):
+    def train(self, seed, targ_estimator, num_queries, expand_n=5):
+        rng = np.random.RandomState(seed)
         encodings = []
         queries = []
         prefix_sum = [0]
         for i in tqdm(range(num_queries), desc="Generating training queries"):
             init_query = self._rand_query(rng)
             encoding = self._encode(init_query)
-            query_expansion = self._rand_decode(encoding, n=expand_n)
+            query_expansion = self._rand_decode(rng, encoding, n=expand_n)
             
             encodings.append(encoding)
             queries.extend(query_expansion)
             
             prefix_sum.append(prefix_sum[-1] + len(query_expansion))
 
-        print("Computing baseline cardinalities...")
-        true_cards = self._compute_cardinalities(queries, self.baseline_estimator)
+
+        oracle_path = f'datasets/qf_{self.table.name}_cards_rows={self.table.cardinality}_n={num_queries}_chunks={self.num_val_chunks}_expansion={expand_n}_seed={seed}.npy'
+        preloaded_cards = os.path.exists(oracle_path)
+
+        if preloaded_cards:
+            print("Loading precomputed cardinalities...")
+            true_cards = np.load(oracle_path)
+        else:
+            print("Computing baseline cardinalities...")
+            true_cards = self._compute_cardinalities(queries, self.baseline_estimator)
+            np.save(oracle_path, np.array(true_cards))
+            print(f"Saved oracle cards to: {oracle_path}")
 
         print("Computing estimator cardinalities...")
         cards = self._compute_cardinalities(queries, targ_estimator)
@@ -205,7 +220,7 @@ class QueryFinder:
 
         print(f"Done! [R^2 = {self.score}]")
 
-    def generate(self, num_queries, max_spec_order=None):
+    def generate(self, rng, num_queries, max_spec_order=None):
         print("Identifying maximizing query encoding...")
         exact_solver = ExactSolver(maximize=True, max_solution_order=max_spec_order)
 
@@ -218,5 +233,5 @@ class QueryFinder:
         best_encoding = np.array(exact_solver.solve())
         
         print("Decoding maximizing query encoding...")
-        queries = self._rand_decode(best_encoding, n=num_queries)
+        queries = self._rand_decode(rng, best_encoding, n=num_queries)
         return queries
