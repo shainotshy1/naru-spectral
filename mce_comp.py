@@ -11,14 +11,20 @@ from tqdm import tqdm
 import copy
 import math
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from scipy.stats import gaussian_kde
 
 import estimators as estimators_lib
 from eval_model import ReportModel, SaveEstimators, RunN, Query
 from mce_estimator import MCE_Estimator
 
+from ind_estimator import IndepEstimator
+
 import time
 from multiprocessing import Pool
+
+from query_finder import QueryFinder
+
 
 import warnings
 warnings.filterwarnings(
@@ -150,7 +156,7 @@ def setup_data_model_eval(rng, table_name, target_ckpt, device, max_rows=None, g
     print(f"Subsampling {max_rows} rows")
     table.EnableSubsample(max_rows, rng)
 
-    oracle_est = estimators_lib.Oracle(table, count_distinct=True)
+    oracle_est = estimators_lib.Oracle(table)
 
     return table, oracle_est, est
 
@@ -290,12 +296,12 @@ def main():
     retrain_model = False
 
     num_train = 10000
-    num_valid = 1000
+    num_valid = 0
 
-    target_algs = ["naru", "forest", "gbt", "linear"]
+    target_algs = ["ind"] #, "linear"] # , "forest", "gbt", "linear"
     test_ests = []
     get_naru = "naru" in target_algs
-# IDEA: Fit the GBT, and then prune coefficients to make sparse representation for fast run-time
+
     max_rows = None
     table_name = 'dmv-tiny'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
@@ -306,52 +312,142 @@ def main():
         test_ests.append(naru_est)
 
     num_threads = 16
-    test_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
+    train_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
     
-    for method in target_algs:
-        if method != "naru":
-            print(f"Generating {method.upper()} Estimator...")
-            est = gen_card_model(method, retrain_model, table, table_name, rows, seed, num_train, rng, test_data)
-            test_ests.append(est)
+    # for method in target_algs:
+    #     if method != "naru" and method != "ind":
+    #         print(f"Generating {method.upper()} Estimator...")
+    #         est = gen_card_model(method, retrain_model, table, table_name, rows, seed, num_train, rng, test_data)
+    #         test_ests.append(est)
+    #     if method == "ind":
+    #         print(f"Generating {method.upper()} Estimator...")
+    #         est = IndepEstimator(table, table_name + f"-{rows}")
+    #         test_ests.append(est)
 
-    print("Evaluating...")
-    valid_q, valid_c = valid_data
-    for i in tqdm(range(num_valid)):
-        query, true_card = valid_q[i], valid_c[i]
-        for est in test_ests:
-            execute_on_est(est, true_card, query, table, None)
-    
-    if "gbt" in target_algs:
-        spec_est = test_ests[target_algs.index("gbt")]
-        print("Example encoding:")
-        ex_idx = 0
-        cols, ops, vals = valid_q[ex_idx]
-        true_card = valid_c[ex_idx]
-        print("    Query:")
-        for c,op,v in zip(cols, ops, vals):
+    ind_est = IndepEstimator(table, table_name + f"-{rows}")
+
+    query_finder = QueryFinder(table, oracle_est, num_val_chunks=2)
+
+    # ex_query = train_data[0][0]
+    # ex_encoding = query_finder._encode(ex_query)
+    # ex_decoding = query_finder._rand_decode(ex_encoding, n=1)
+    # print("Original:")
+    # for c,op,v in zip(ex_query[0], ex_query[1], ex_query[2]):
+    #     print(f"    {c.name} {str(op)} {v}")
+    # print("Decoded:")
+    # for c,op,v in zip(ex_decoding[0][0], ex_decoding[0][1], ex_decoding[0][2]):
+    #     print(f"    {c.name} {str(op)} {v}")
+
+    # print("Example query encoding:", ex_encoding)
+
+
+    query_finder.train(ind_est, train_data[0], expand_n=1)
+    benchmark_queries = query_finder.generate(num_queries=5, max_spec_order=None)
+
+    print("Evaluating benchmark queries...")
+    true_cards = query_finder._compute_cardinalities(benchmark_queries, query_finder.baseline_estimator, num_threads=1)
+    cards = query_finder._compute_cardinalities(benchmark_queries, ind_est, num_threads=1)
+    for i, (q, true_card, card) in enumerate(zip(benchmark_queries, true_cards, cards)):
+        card, true_card = max(card, 1), max(true_card, 1) # Avoid divide-by-zero
+        print(f"Query {i+1}:")
+        for c,op,v in zip(q[0], q[1], q[2]):
             print(f"     {c.name} {str(op)} {v}")
-
-        ex_vec = spec_est._query_to_vec(cols, ops, vals,)
-        print(f"    Encoding: {ex_vec}")
-        inv_cols, inv_ops, inv_vals = spec_est._vec_to_query(ex_vec)
-        print("    Inverse: ")
-        for c,op,v in zip(inv_cols, inv_ops, inv_vals):
-            print(f"     {c.name} {str(op)} {v}")
-            
-        print(f"    Cardinality: {true_card}")
-        print(f"    Prediction: {spec_est.Query(cols, ops, vals, store=False)}")
-
-    for est in test_ests:  
-        print(f"---{est.name}---")
-        print_est(est, attribute='errs')
-        print_est(est, attribute='query_dur_ms')
+        print(f"    True Cardinality: {true_card}")
+        print(f"    Indep Estimation: {card}")
+        print(f"    Q-Error: {max(true_card, card) / min(true_card, card)}")
         print()
 
-    colors = ['#C877E3', '#7796E3', '#B8EB9D']
-    plot_estimators_boxplots(test_ests, filename="fig_err.png", target_stat='errs', label='Estimation Error', title="")
-    plot_estimators_boxplots(test_ests, filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
 
-    # SaveEstimators("results_spec.csv", [spec_est])
+    # print("Evaluating...")
+    # valid_q, valid_c = valid_data
+    # for i in tqdm(range(num_valid)):
+    #     query, true_card = valid_q[i], valid_c[i]
+    #     for est in test_ests:
+    #         execute_on_est(est, true_card, query, table, None)
+    #         if est.name == "Naru" and est.errs[-1] > 8:
+    #             est.errs.pop()
+    #             est.est_cards.pop()
+    #             est.true_cards.pop()
+    #             break # skip rest since invalid query - hardcoding since there is some encoding issue
+    #         # if est.name == "Naru":
+    #         #     print(true_card, est.est_cards[-1], est.errs[-1])
+
+    # if "gbt" in target_algs:
+    #     spec_est = test_ests[target_algs.index("gbt")]
+    #     print("Example encoding:")
+    #     ex_idx = 0
+    #     cols, ops, vals = valid_q[ex_idx]
+    #     true_card = valid_c[ex_idx]
+    #     print("    Query:")
+    #     for c,op,v in zip(cols, ops, vals):
+    #         print(f"     {c.name} {str(op)} {v}")
+
+    #     ex_vec = spec_est._query_to_vec(cols, ops, vals,)
+    #     print(f"    Encoding: {ex_vec}")
+    #     inv_cols, inv_ops, inv_vals = spec_est._vec_to_query(ex_vec)
+    #     print("    Inverse: ")
+    #     for c,op,v in zip(inv_cols, inv_ops, inv_vals):
+    #         print(f"     {c.name} {str(op)} {v}")
+            
+    #     print(f"    Cardinality: {true_card}")
+    #     print(f"    Prediction: {spec_est.Query(cols, ops, vals, store=False)}")
+
+    # for est in test_ests:  
+    #     print(f"---{est.name}---")
+    #     print_est(est, attribute='errs')
+    #     print_est(est, attribute='query_dur_ms')
+    #     print()
+
+    # test_ests[0], test_ests[1] = test_ests[1], test_ests[0] # Put independent in the front
+
+    # -------------------------- #
+    # for i in range(1, len(test_ests)):
+    #     print(test_ests[i].name)
+    #     errs1 = np.array(test_ests[0].errs)
+    #     errs2 = np.array(test_ests[i].errs)
+
+    #     top = 10
+    #     res = []
+    #     for top in np.arange(0, 105, 5):
+    #         top_worst1 = np.where(errs1 >= np.percentile(errs1, 100 - top))[0]
+    #         top_worst2 = np.where(errs2 >= np.percentile(errs2, 100 - top))[0]
+    #         shared = np.setdiff1d(top_worst1, np.setxor1d(top_worst1, top_worst2))
+    #         prop_shared = len(shared) / len(top_worst1)
+    #         res.append(prop_shared)
+    #     print(res)
+
+    #     from scipy.stats import pearsonr, spearmanr
+
+    #     pearson_corr, _ = pearsonr(errs1, errs2)
+    #     spearman_corr, _ = spearmanr(errs1, errs2)
+
+    #     print(f"Full estimator Pearson correlation: {pearson_corr:.4f}")
+    #     print(f"Full estimator Spearman correlation: {spearman_corr:.4f}")
+
+    #     percent = 10#10 / num_valid * 100
+    #     worst_idx = np.where(errs1 >= np.percentile(errs1, 100 - percent))[0]
+    #     normal_idx = np.setdiff1d(np.arange(len(errs2)), worst_idx)
+
+    #     fig, ax = plt.subplots(figsize=(14, 2))
+
+    #     ax.scatter(errs2[normal_idx], np.zeros(len(normal_idx)), color="steelblue", s=6,  alpha=0.5, label="est2")
+    #     ax.scatter(errs2[worst_idx],  np.zeros(len(worst_idx)),  color="crimson",   s=12, alpha=0.9, label=f"est2 @ est1 worst {percent}%")
+
+    #     ax.set_xscale("log")
+    #     ax.set_xlabel("Q-Error")
+    #     ax.yaxis.set_visible(False)
+    #     ax.spines[["left", "top", "right"]].set_visible(False)
+    #     ax.legend(fontsize=9)
+    #     plt.tight_layout()
+    #     plt.savefig(f"err_highlights_{test_ests[i].name}.png", dpi=300)
+    #     plt.close()
+    # -------------------------- #
+
+    # colors = ['#C877E3', '#7796E3', '#B8EB9D']
+    # plot_estimators_boxplots(test_ests, filename="fig_err.png", target_stat='errs', label='Estimation Error', title="")
+    # plot_estimators_boxplots(test_ests, filename="fig_query_dur.png", target_stat='query_dur_ms', label='Execution Duration (ms)', title="")
+
+    # SaveEstimators("results.csv", test_ests)
     print('...Done')
 
 if __name__ == "__main__":

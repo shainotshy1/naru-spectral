@@ -147,6 +147,9 @@ class Table(object):
         """Returns index of column with the specified name."""
         assert name in self.name_to_index
         return self.name_to_index[name]
+    
+    def GetColumn(self, name):
+        return self.columns[self.ColumnIndex(name)]
 
     def EnableSubsample(self, max_rows, rng):
         if max_rows is not None and self.cardinality > max_rows:

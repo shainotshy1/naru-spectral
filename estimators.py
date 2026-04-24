@@ -521,15 +521,14 @@ class Heuristic(CardEst):
 class Oracle(CardEst):
     """Returns true cardinalities."""
 
-    def __init__(self, table, limit_first_n=None, count_distinct=False):
+    def __init__(self, table, limit_first_n=None):
         super(Oracle, self).__init__()
         self.table = table
         self.limit_first_n = limit_first_n
-        self.count_distinct = count_distinct
 
-        self.col_indexes = {}
-        for c in table.Columns():
-            self.col_indexes[c] = len(self.col_indexes)
+        # self.col_indexes = {}
+        # for c in table.Columns():
+        #     self.col_indexes[c] = len(self.col_indexes)
 
     def __str__(self):
         return 'oracle'
