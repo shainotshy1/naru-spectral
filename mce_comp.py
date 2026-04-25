@@ -297,7 +297,7 @@ def main():
     recollect_data = False
     retrain_model = False
 
-    num_train = 100000
+    num_train = 10000
     num_valid = 0
 
     target_algs = ["ind"] #, "linear"] # , "forest", "gbt", "linear"
@@ -313,38 +313,16 @@ def main():
     if get_naru:
         test_ests.append(naru_est)
 
-    num_threads = 16
-    # train_data, valid_data = get_train_valid_data(rng, table, table_name, oracle_est, rows, seed, num_train, num_valid, recollect_data=recollect_data, num_threads=num_threads)
-    
-    # for method in target_algs:
-    #     if method != "naru" and method != "ind":
-    #         print(f"Generating {method.upper()} Estimator...")
-    #         est = gen_card_model(method, retrain_model, table, table_name, rows, seed, num_train, rng, test_data)
-    #         test_ests.append(est)
-    #     if method == "ind":
-    #         print(f"Generating {method.upper()} Estimator...")
-    #         est = IndepEstimator(table, table_name + f"-{rows}")
-    #         test_ests.append(est)
+    num_threads = 4
 
     ind_est = IndepEstimator(table, table_name + f"-{rows}")
 
-    query_finder = QueryFinder(table, oracle_est, num_val_chunks=10)
-
-    # ex_query = train_data[0][0]
-    # ex_encoding = query_finder._encode(ex_query)
-    # ex_decoding = query_finder._rand_decode(ex_encoding, n=1)
-    # print("Original:")
-    # for c,op,v in zip(ex_query[0], ex_query[1], ex_query[2]):
-    #     print(f"    {c.name} {str(op)} {v}")
-    # print("Decoded:")
-    # for c,op,v in zip(ex_decoding[0][0], ex_decoding[0][1], ex_decoding[0][2]):
-    #     print(f"    {c.name} {str(op)} {v}")
-
-    # print("Example query encoding:", ex_encoding)
-
+    query_finder = QueryFinder(table, oracle_est, num_val_chunks=2)
 
     query_finder.train(seed, ind_est, num_train, expand_n=1, num_threads=num_threads)
     benchmark_queries = query_finder.generate(rng, num_queries=5, max_spec_order=None)
+
+    # benchmark_queries = query_finder.generate_mh(rng, ind_est, num_queries=20, num_iterations=1000)
 
     print("Evaluating benchmark queries...")
     true_cards = query_finder._compute_cardinalities(benchmark_queries, query_finder.baseline_estimator, num_threads=1)

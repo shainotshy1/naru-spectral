@@ -2,7 +2,7 @@ from multiprocessing.pool import Pool
 import os
 from turtle import pd
 
-from matplotlib.pyplot import clf
+from matplotlib.pyplot import clf, table
 import numpy as np
 import copy
 from sklearn.linear_model import Lasso
@@ -11,6 +11,8 @@ from tqdm import tqdm
 import lightgbm as lgb
 from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, ExactSolver
 import math
+
+import matplotlib.pyplot as plt
 
 class QueryFinder:
     def __init__(self, table, baseline_estimator, num_val_chunks=5):
@@ -58,7 +60,7 @@ class QueryFinder:
         oracle = copy.deepcopy(oracle_est)
         
         results = []
-        for cols, ops, vals in tqdm(queries_chunk):
+        for cols, ops, vals in queries_chunk: #tqdm(queries_chunk):
             results.append(oracle.Query(cols, ops, vals))
         return results
     
@@ -83,7 +85,7 @@ class QueryFinder:
         return cardinalities
 
     def _rand_query(self, rng, nan_check=False):
-        num_filters = rng.randint(1, min(15, len(self.table.columns) + 1))
+        num_filters = rng.randint(3, min(8, len(self.table.columns) + 1))
         s = self.table.data.iloc[rng.randint(0, self.table.cardinality)]
         vals = s.values
         vals[6] = vals[6].to_datetime64()
@@ -166,6 +168,7 @@ class QueryFinder:
         prefix_sum = [0]
         for i in tqdm(range(num_queries), desc="Generating training queries"):
             init_query = self._rand_query(rng)
+            # query_expansion = [init_query]
             encoding = self._encode(init_query)
             query_expansion = self._rand_decode(rng, encoding, n=expand_n)
             
@@ -173,7 +176,6 @@ class QueryFinder:
             queries.extend(query_expansion)
             
             prefix_sum.append(prefix_sum[-1] + len(query_expansion))
-
 
         oracle_path = f'datasets/qf_{self.table.name}_cards_rows={self.table.cardinality}_n={num_queries}_chunks={self.num_val_chunks}_expansion={expand_n}_seed={seed}.npy'
         preloaded_cards = os.path.exists(oracle_path)
@@ -196,14 +198,30 @@ class QueryFinder:
         true_cards = np.maximum(true_cards, 1)
         q_errors = np.maximum(cards, true_cards) / np.minimum(cards, true_cards)
 
+        print(f"Q-Error stats: mean={np.mean(q_errors):.4f}, median={np.median(q_errors):.4f}, 90th percentile={np.percentile(q_errors, 90):.4f}, 99th percentile={np.percentile(q_errors, 99):.4f}")
+
         avg_q_errors = []
         for i in range(num_queries):
             start, end = prefix_sum[i], prefix_sum[i+1]
-            avg_q_error = np.mean(q_errors[start:end])
+            avg_q_error = np.max(q_errors[start:end])
             avg_q_errors.append(avg_q_error)
 
         X = np.array(encodings)
         y = np.array(avg_q_errors)
+
+        # model = Lasso(max_iter=10000)
+
+        # param_grid = {
+        #     'alpha': [1e-5, 1e-4, 1e-3, 1e-2, 1e-1]
+        # }
+
+        # grid_search = GridSearchCV(
+        #     self.model,
+        #     param_grid=param_grid,
+        #     cv=5,
+        #     scoring='r2',
+        #     verbose=0
+        # )
 
         model = lgb.LGBMRegressor(verbose=-1, n_jobs=1)
 
@@ -229,16 +247,80 @@ class QueryFinder:
 
     def generate(self, rng, num_queries, max_spec_order=None):
         print("Identifying maximizing query encoding...")
+        
+        # a = np.array(self.model.coef_.flatten().tolist())
+        # # b = self.model.intercept_
+        # best_encoding = np.zeros_like(a, dtype=int)
+
+        # if max_spec_order is None:
+        #     best_encoding[a > 0] = 1
+        # else:
+        #     best_indices = np.argpartition(a, -max_spec_order)[-max_spec_order:]
+        #     best_encoding[best_indices] = 1
+        #     best_encoding[a <= 0] = 0
+
+        # print(best_encoding, type(best_encoding), best_encoding.shape)
+        
         exact_solver = ExactSolver(maximize=True, max_solution_order=max_spec_order)
 
         fourier_dict = lgboost_to_fourier(self.model)
 
         sorted_fourier = sorted(fourier_dict.items(), key=lambda item: abs(item[1]), reverse=True)
-        fourier_dict_trunc = dict(sorted_fourier[:2000])
+        fourier_dict_trunc = dict(sorted_fourier[:2000]) # TODO: Make inner-range queries possible
 
         exact_solver.load_fourier_dictionary(fourier_dict_trunc)
         best_encoding = np.array(exact_solver.solve())
         
+        print("Expected score: ", self.model.predict(best_encoding.reshape(1, -1))[0]) # type: ignore
+
         print("Decoding maximizing query encoding...")
         queries = self._rand_decode(rng, best_encoding, n=num_queries)
         return queries
+    
+    def generate_mh(self, rng, targ_estimator, num_queries, num_iterations=1000):
+        print("Generating random initial query...")
+        num_iterations = max(num_iterations, num_queries)
+
+        def calc_qerror(query):
+            true_card = max(self._compute_cardinalities([query], self.baseline_estimator)[0], 1)
+            est_card = max(self._compute_cardinalities([query], targ_estimator)[0], 1)
+            q_error = max(true_card, est_card) / min(true_card, est_card)
+            return q_error / self.table.cardinality # Normalize by total rows to keep rewards in a reasonable range
+
+        curr_query = self._rand_query(rng)
+        all_queries = [curr_query]
+        all_rewards = [calc_qerror(curr_query)]
+
+        beta = 0.1 # Temperature parameter for acceptance probability
+        
+        acceptance = 0
+        for _ in range(num_iterations):
+            init_query = self._rand_query(rng)
+            encoding = self._encode(init_query)
+            prop_query = self._rand_decode(rng, encoding, n=1)[0]
+
+            prop_q_error = calc_qerror(prop_query) # Normalize by total rows to keep rewards in a reasonable range
+            curr_q_error = all_rewards[-1]
+
+            print(prop_q_error)
+            
+            log_accept_prob = (prop_q_error-curr_q_error) / beta
+            accept_prob = min(1, math.exp(log_accept_prob))
+
+            if rng.rand() < accept_prob:
+                acceptance += 1
+                curr_query = prop_query
+                all_queries.append(curr_query)
+                all_rewards.append(prop_q_error)
+        
+        print(f"MH Acceptance Rate: {acceptance / num_iterations:.4f}")
+
+        # Save reward trajectory
+        plt.plot(all_rewards)
+        plt.xlabel("Iteration")
+        plt.ylabel("Q-Error")
+        plt.title(r"Metropolis-Hastings Q-Error Trajectory ($\beta=%.2f$)" % beta)
+        plt.savefig(f"mh_trajectory_{self.table.name}_cards_rows={self.table.cardinality}_n={num_queries}_iter={num_iterations}.png")
+        plt.clf()
+
+        return all_queries[:num_queries]
