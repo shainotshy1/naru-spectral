@@ -1,5 +1,6 @@
 from multiprocessing.pool import Pool
 import os
+from turtle import pd
 
 from matplotlib.pyplot import clf
 import numpy as np
@@ -32,8 +33,11 @@ class QueryFinder:
                 
             prev_curr = curr_idx + 1
             
+            vals = np.array(c.all_distinct_values)
+            clean = np.array([v for v in vals if not (isinstance(v, float) and math.isnan(v))])
+            
             curr_chunk = -1
-            for i, v in enumerate(sorted(c.all_distinct_values)):
+            for i, v in enumerate(sorted(clean)):
                 targ_chunk = i // chunk_size
 
                 if targ_chunk != curr_chunk:
@@ -41,7 +45,7 @@ class QueryFinder:
                     curr_chunk += 1
                     inv_map[curr_idx] = []
 
-                val_map[v] = curr_idx    
+                val_map[v] = curr_idx
                 inv_map[curr_idx].append(v)
 
             self.col_range_map[c.name] = (prev_curr, curr_idx + 1)
@@ -110,13 +114,16 @@ class QueryFinder:
         vec = np.zeros(self.encoding_length, dtype=int)
         for c, op, v in zip(columns, operators, vals):
             start, end = self.col_range_map[c.name]
-            v_idx = self.val_map[c.name][v]
-            if op == "=":
-                vec[v_idx] = 1
-            elif op == "<=":
-                vec[start:end] = np.arange(start, end) <= v_idx
-            elif op == ">=":
-                vec[start:end] = np.arange(start, end) >= v_idx
+            if isinstance(v, float) and math.isnan(v):
+                vec[end - 1] = 1 # Let last chunk be for NaN values
+            else:
+                v_idx = self.val_map[c.name][v]    
+                if op == "=":
+                    vec[v_idx] = 1
+                elif op == "<=":
+                    vec[start:end] = np.arange(start, end) <= v_idx
+                elif op == ">=":
+                    vec[start:end] = np.arange(start, end) >= v_idx
 
         return vec
 
@@ -152,7 +159,7 @@ class QueryFinder:
 
         return queries
 
-    def train(self, seed, targ_estimator, num_queries, expand_n=5):
+    def train(self, seed, targ_estimator, num_queries, expand_n=5, num_threads=4):
         rng = np.random.RandomState(seed)
         encodings = []
         queries = []
@@ -176,12 +183,12 @@ class QueryFinder:
             true_cards = np.load(oracle_path)
         else:
             print("Computing baseline cardinalities...")
-            true_cards = self._compute_cardinalities(queries, self.baseline_estimator)
+            true_cards = self._compute_cardinalities(queries, self.baseline_estimator, num_threads=num_threads)
             np.save(oracle_path, np.array(true_cards))
             print(f"Saved oracle cards to: {oracle_path}")
 
         print("Computing estimator cardinalities...")
-        cards = self._compute_cardinalities(queries, targ_estimator)
+        cards = self._compute_cardinalities(queries, targ_estimator, num_threads=num_threads)
 
         print("Training estimator...")
         # Avoid divide-by-zero

@@ -297,7 +297,7 @@ def main():
     recollect_data = False
     retrain_model = False
 
-    num_train = 5000
+    num_train = 100000
     num_valid = 0
 
     target_algs = ["ind"] #, "linear"] # , "forest", "gbt", "linear"
@@ -305,7 +305,7 @@ def main():
     get_naru = "naru" in target_algs
 
     max_rows = None
-    table_name = 'dmv-tiny'
+    table_name = 'dmv'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
     table, oracle_est, naru_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows, get_naru=get_naru)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
@@ -328,7 +328,7 @@ def main():
 
     ind_est = IndepEstimator(table, table_name + f"-{rows}")
 
-    query_finder = QueryFinder(table, oracle_est, num_val_chunks=2)
+    query_finder = QueryFinder(table, oracle_est, num_val_chunks=10)
 
     # ex_query = train_data[0][0]
     # ex_encoding = query_finder._encode(ex_query)
@@ -343,7 +343,7 @@ def main():
     # print("Example query encoding:", ex_encoding)
 
 
-    query_finder.train(seed, ind_est, num_train, expand_n=5)
+    query_finder.train(seed, ind_est, num_train, expand_n=1, num_threads=num_threads)
     benchmark_queries = query_finder.generate(rng, num_queries=5, max_spec_order=None)
 
     print("Evaluating benchmark queries...")

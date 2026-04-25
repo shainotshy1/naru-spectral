@@ -120,7 +120,7 @@ class ExactSolver:
         self.max_solution_order = max_solution_order
         self.loaded = False
         self.key = {
-            "LICENSEID": 2813089,
+            "LICENSEID": 2680322,
         }
 
         with suppress_stdout():
