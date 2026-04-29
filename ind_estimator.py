@@ -49,37 +49,6 @@ def _encode_counts(counts: dict) -> list:
 def _decode_counts(pairs: list) -> dict:
     return {_decode_value(enc): cnt for enc, cnt in pairs}
 
-
-# ---------------------------------------------------------------------------
-# Vectorized index builder
-# ---------------------------------------------------------------------------
-
-def _build_typed_arrays(counts: dict) -> dict:
-    """
-    Partition a {value: count} dict into per-type buckets, each stored as a
-    pair of numpy arrays (values_arr, counts_arr).
-
-    Grouping by type means every bucket is homogeneous, so numpy can apply
-    comparison operators across the whole bucket in a single vectorized call.
-
-    NaN floats are kept in the float bucket; comparisons against NaN will
-    naturally return False, which is the correct semantics.
-    """
-    buckets: dict[type, tuple[list, list]] = {}
-    for val, cnt in counts.items():
-        t = type(val)
-        if t not in buckets:
-            buckets[t] = ([], [])
-        buckets[t][0].append(val)
-        buckets[t][1].append(cnt)
-
-    return {
-        t: (np.array(vals, dtype=object if t is str else None),
-            np.array(cnts, dtype=np.int64))
-        for t, (vals, cnts) in buckets.items()
-    }
-
-
 # ---------------------------------------------------------------------------
 # Estimator
 # ---------------------------------------------------------------------------
@@ -113,11 +82,9 @@ class IndepEstimator(CardEst):
             self._save_cache(cache_path)
             print(f"Saved value counts to cache: {cache_path}")
 
-        # Build typed numpy arrays once; _selectivity uses them exclusively.
-        self.col_typed_arrays: dict[str, dict] = {
-            col_name: _build_typed_arrays(counts)
-            for col_name, counts in self.value_counts.items()
-        }
+        self.value_count_vecs = {}
+        for c, counts in self.value_counts.items():
+            self.value_count_vecs[c] = np.array(list(counts.keys())), np.array(list(counts.values()))
 
     # ------------------------------------------------------------------
     # Cache helpers
@@ -153,28 +120,34 @@ class IndepEstimator(CardEst):
     def __str__(self):
         return "indep_estimator"
 
+    def _canonical_type(self, val):
+        if isinstance(val, (np.integer, int)):
+            return int
+        if isinstance(val, (np.floating, float)):
+            return float
+        if isinstance(val, (pd.Timestamp, np.datetime64)):
+            return pd.Timestamp
+        return type(val)
+
     def _selectivity(self, column, operator, value):
         """Estimate selectivity for a single predicate — fully vectorized."""
         if operator not in OPS:
             raise NotImplementedError(f"Operator {operator} not supported")
 
-        # Normalise datetime queries to pd.Timestamp so they land in the
-        # same type bucket as values loaded from a pandas DataFrame.
         if type(value) is np.datetime64:
             value = pd.Timestamp(value)
 
-        typed = self.col_typed_arrays[column.name]
-        t = type(value)
+        vals, cnts = self.value_count_vecs[column.name]
 
-        # No values of this type → predicate matches nothing.
-        if t not in typed:
-            return 0.0
-
-        vals, cnts = typed[t]
-
-        # Single vectorized comparison across the entire bucket; no Python loop.
-        mask = OPS[operator](vals, value)
-        matched = cnts[mask].sum()
+        if isinstance(value, float) and isnan(value):
+            try:
+                nan_mask = np.array([isinstance(v, float) and isnan(v) for v in vals])
+            except Exception:
+                nan_mask = np.zeros(len(vals), dtype=bool)
+            matched = cnts[nan_mask].sum()        
+        else:
+            mask = OPS[operator](vals, value)
+            matched = cnts[mask].sum()
 
         return int(matched) / self.total_rows
 

@@ -1,7 +1,5 @@
 from multiprocessing.pool import Pool
 import os
-from turtle import pd
-
 from matplotlib.pyplot import clf, table
 import numpy as np
 import copy
@@ -13,6 +11,36 @@ from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, 
 import math
 
 import matplotlib.pyplot as plt
+
+def _compute_cardinalities_chunk(args):
+    queries_chunk, oracle_est = args
+    oracle = copy.deepcopy(oracle_est)
+    
+    results = []
+    for cols, ops, vals in tqdm(queries_chunk):
+        results.append(oracle.Query(cols, ops, vals))
+    return results
+
+def _compute_cardinalities(queries, oracle_est, num_threads=4):
+    num_threads = min(num_threads, len(queries))
+    
+    n = len(queries)
+    stride = (n + num_threads - 1) // num_threads
+    chunks = [
+        queries[i:i+stride]
+        for i in range(0, n, stride)
+    ]
+
+    with Pool(num_threads) as pool:
+        results = pool.map(
+            _compute_cardinalities_chunk,
+            [(chunk, oracle_est) for chunk in chunks]
+        )
+
+    cardinalities = np.concatenate([np.array(r) for r in results])
+
+    return cardinalities
+
 
 class QueryFinder:
     def __init__(self, table, baseline_estimator, num_val_chunks=5):
@@ -55,55 +83,24 @@ class QueryFinder:
         self.encoding_length = curr_idx + 1
         print("Encoding Length:", self.encoding_length)
 
-    def _compute_cardinalities_chunk(self, args):
-        queries_chunk, oracle_est = args
-        oracle = copy.deepcopy(oracle_est)
+    def _rand_query(self, rng):
+        # Do not generate queries with nan in them
+        num_filters = rng.randint(1, min(15, len(self.table.columns) + 1))        
+        idxs = rng.choice(len(self.table.columns), replace=False, size=num_filters)
+        ops = rng.choice(['=', ">=", "<="], size=num_filters) # add 'null' filter
         
-        results = []
-        for cols, ops, vals in queries_chunk: #tqdm(queries_chunk):
-            results.append(oracle.Query(cols, ops, vals))
-        return results
-    
-    def _compute_cardinalities(self, queries, oracle_est, num_threads=4):
-        num_threads = min(num_threads, len(queries))
-        
-        n = len(queries)
-        stride = (n + num_threads - 1) // num_threads
-        chunks = [
-            queries[i:i+stride]
-            for i in range(0, n, stride)
-        ]
+        vals = [] 
+        for i in idxs:
+            options = self.table.columns[i].all_distinct_values
+            v = rng.choice([val for val in options if not (isinstance(val, float) and math.isnan(val))])
+            vals.append(v)
 
-        with Pool(num_threads) as pool:
-            results = pool.map(
-                self._compute_cardinalities_chunk,
-                [(chunk, oracle_est) for chunk in chunks]
-            )
-
-        cardinalities = np.concatenate([np.array(r) for r in results])
-
-        return cardinalities
-
-    def _rand_query(self, rng, nan_check=False):
-        num_filters = rng.randint(3, min(8, len(self.table.columns) + 1))
-        s = self.table.data.iloc[rng.randint(0, self.table.cardinality)]
-        vals = s.values
-        vals[6] = vals[6].to_datetime64()
-        idxs = []
-        ops = []
-        target_vals = [float('nan')]
-        while any([type(v) is float and math.isnan(v) for v in target_vals]):
-            idxs = rng.choice(len(self.table.columns), replace=False, size=num_filters)
-            ops = rng.choice(['=', ">=", "<="], size=num_filters) # add 'null' filter
-            ops_all_eqs = ['='] * num_filters
-            sensible_to_do_range = [self.table.columns[i].DistributionSize() >= 10 for i in idxs]
-            ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
-            target_vals = vals[idxs]
-            if not nan_check:
-                break
+        ops_all_eqs = ['='] * num_filters
+        sensible_to_do_range = [self.table.columns[i].DistributionSize() >= 10 for i in idxs]
+        ops = np.where(sensible_to_do_range, ops, ops_all_eqs)
 
         cols = np.take(self.table.columns, idxs)
-        query = (cols, ops, target_vals)
+        query = (cols, ops, vals)
 
         return query
 
@@ -185,12 +182,12 @@ class QueryFinder:
             true_cards = np.load(oracle_path)
         else:
             print("Computing baseline cardinalities...")
-            true_cards = self._compute_cardinalities(queries, self.baseline_estimator, num_threads=num_threads)
+            true_cards = _compute_cardinalities(queries, self.baseline_estimator, num_threads=num_threads)
             np.save(oracle_path, np.array(true_cards))
             print(f"Saved oracle cards to: {oracle_path}")
 
         print("Computing estimator cardinalities...")
-        cards = self._compute_cardinalities(queries, targ_estimator, num_threads=num_threads)
+        cards = _compute_cardinalities(queries, targ_estimator, num_threads=num_threads)
 
         print("Training estimator...")
         # Avoid divide-by-zero
@@ -198,7 +195,21 @@ class QueryFinder:
         true_cards = np.maximum(true_cards, 1)
         q_errors = np.maximum(cards, true_cards) / np.minimum(cards, true_cards)
 
-        print(f"Q-Error stats: mean={np.mean(q_errors):.4f}, median={np.median(q_errors):.4f}, 90th percentile={np.percentile(q_errors, 90):.4f}, 99th percentile={np.percentile(q_errors, 99):.4f}")
+        print(f"Cardinality stats: mean={np.mean(true_cards):.4f}, median={np.median(true_cards):.4f}, 90th percentile={np.percentile(true_cards, 90):.4f}, 99th percentile={np.percentile(true_cards, 99):.4f}, max={np.max(true_cards)}")
+        print(f"Q-Error stats: mean={np.mean(q_errors):.4f}, median={np.median(q_errors):.4f}, 90th percentile={np.percentile(q_errors, 90):.4f}, 99th percentile={np.percentile(q_errors, 99):.4f}, max={np.max(q_errors)}")
+
+        fig, ax = plt.subplots(figsize=(14, 2))
+
+        ax.scatter(q_errors, np.zeros(len(q_errors)), color="steelblue", s=6,  alpha=0.5)
+
+        ax.set_xscale("log")
+        ax.set_xlabel("Q-Error")
+        ax.yaxis.set_visible(False)
+        ax.spines[["left", "top", "right"]].set_visible(False)
+        plt.title(f"Independence Model Q-Error Distribution: {self.table.name}")
+        plt.tight_layout()
+        plt.savefig(f"err_highlights_ind_{len(q_errors)}_{self.table.name}.png", dpi=300)
+        plt.close()
 
         avg_q_errors = []
         for i in range(num_queries):
@@ -216,7 +227,7 @@ class QueryFinder:
         # }
 
         # grid_search = GridSearchCV(
-        #     self.model,
+        #     model,
         #     param_grid=param_grid,
         #     cv=5,
         #     scoring='r2',
@@ -266,6 +277,7 @@ class QueryFinder:
         fourier_dict = lgboost_to_fourier(self.model)
 
         sorted_fourier = sorted(fourier_dict.items(), key=lambda item: abs(item[1]), reverse=True)
+        print(len(sorted_fourier))
         fourier_dict_trunc = dict(sorted_fourier[:2000]) # TODO: Make inner-range queries possible
 
         exact_solver.load_fourier_dictionary(fourier_dict_trunc)
@@ -282,8 +294,8 @@ class QueryFinder:
         num_iterations = max(num_iterations, num_queries)
 
         def calc_qerror(query):
-            true_card = max(self._compute_cardinalities([query], self.baseline_estimator)[0], 1)
-            est_card = max(self._compute_cardinalities([query], targ_estimator)[0], 1)
+            true_card = max(_compute_cardinalities([query], self.baseline_estimator)[0], 1)
+            est_card = max(_compute_cardinalities([query], targ_estimator)[0], 1)
             q_error = max(true_card, est_card) / min(true_card, est_card)
             return q_error / self.table.cardinality # Normalize by total rows to keep rewards in a reasonable range
 
@@ -301,8 +313,6 @@ class QueryFinder:
 
             prop_q_error = calc_qerror(prop_query) # Normalize by total rows to keep rewards in a reasonable range
             curr_q_error = all_rewards[-1]
-
-            print(prop_q_error)
             
             log_accept_prob = (prop_q_error-curr_q_error) / beta
             accept_prob = min(1, math.exp(log_accept_prob))
