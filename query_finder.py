@@ -10,6 +10,11 @@ import lightgbm as lgb
 from tree_spex import lgboost_fit, lgboost_to_fourier, lgboost_tree_to_fourier, ExactSolver
 import math
 
+from sklearn.metrics import r2_score
+from scipy.stats import pearsonr, spearmanr
+
+from mce_estimator import MCE_Estimator
+
 import matplotlib.pyplot as plt
 
 def _compute_cardinalities_chunk(args):
@@ -194,6 +199,33 @@ class QueryFinder:
         cards = np.maximum(cards, 1)
         true_cards = np.maximum(true_cards, 1)
         q_errors = np.maximum(cards, true_cards) / np.minimum(cards, true_cards)
+
+
+        # ------------------------------------------------------------------------- #
+        train_prop = 0.9
+        train_n = int(train_prop * len(queries))
+        train_queries, valid_queries = queries[:train_n], queries[train_n:]
+        train_errs, valid_errs = q_errors[:train_n], q_errors[train_n:]
+        q_err_predictor = MCE_Estimator(self.table, rng, method="gbt")
+        q_err_predictor.train(train_queries, train_errs, targ_score='mae')
+
+        predictions = []
+        for q in valid_queries:
+            pred = q_err_predictor.Query(q[0], q[1], q[2], store=False, card_project=False)
+            predictions.append(pred)
+
+        mae_error_pred = (np.abs(np.array(predictions) - np.array(valid_errs))).mean()
+        print("Q-error Predictor MAE:", mae_error_pred)
+        # Pearson correlation (linear relationship)
+        pearson_corr, pearson_p = pearsonr(valid_errs, predictions)
+        print("Pearson correlation:", pearson_corr)
+        print("Pearson p-value:", pearson_p)
+
+        # Spearman correlation (rank-based, monotonic relationship)
+        spearman_corr, spearman_p = spearmanr(valid_errs, predictions)
+        print("Spearman correlation:", spearman_corr)
+        print("Spearman p-value:", spearman_p)
+        # ------------------------------------------------------------------------- #
 
         print(f"Cardinality stats: mean={np.mean(true_cards):.4f}, median={np.median(true_cards):.4f}, 90th percentile={np.percentile(true_cards, 90):.4f}, 99th percentile={np.percentile(true_cards, 99):.4f}, max={np.max(true_cards)}")
         print(f"Q-Error stats: mean={np.mean(q_errors):.4f}, median={np.median(q_errors):.4f}, 90th percentile={np.percentile(q_errors, 90):.4f}, 99th percentile={np.percentile(q_errors, 99):.4f}, max={np.max(q_errors)}")

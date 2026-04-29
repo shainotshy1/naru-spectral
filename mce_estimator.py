@@ -10,7 +10,7 @@ import lightgbm as lgb
 from sklearn.model_selection import GridSearchCV
 import pickle
 
-from sklearn.metrics import make_scorer
+from sklearn.metrics import make_scorer, mean_absolute_error
 
 class MCE_Estimator(CardEst):
     def __init__(self, table, rng, method="gbt"):
@@ -23,10 +23,6 @@ class MCE_Estimator(CardEst):
         self.score = None
         self.table = table
         self.rng = rng
-
-        # Count distinct of strings - how? Use sentiment score to approximate the value so it can be passed to the GBT
-        # IDEA: How to do cardinality estimation with string arguments? Use sentiment analysis as input rather than the string themselves
-        # Limitations: GBTs are powerful but this work is limited by its assumption of the data being floats. How can we deal with string data?
 
         print("Setting up structures...", end="", flush=True)
 
@@ -84,7 +80,7 @@ class MCE_Estimator(CardEst):
         
         return cols, ops, vals
 
-    def Query(self, columns, operators, vals, store=True):
+    def Query(self, columns, operators, vals, store=True, card_project=True):
         assert len(columns) == len(operators) == len(vals)
         assert self.model is not None, "Must train model first!"
         mask = self._query_to_vec(columns, operators, vals)
@@ -93,7 +89,10 @@ class MCE_Estimator(CardEst):
         c = self.model.predict(mask.reshape(1, -1)) # type: ignore
         if store: self.OnEnd()
 
-        return int(np.maximum(np.round(c[0]), 0)) # type: ignore
+        if card_project:
+            return int(np.maximum(np.round(c[0]), 0)) # type: ignore
+        else: 
+            return c[0] # type: ignore
 
     def _q_error(self, y_true, y_pred):
         eps = 1e-10
@@ -103,7 +102,7 @@ class MCE_Estimator(CardEst):
         q = np.maximum(y_pred / y_true, y_true / y_pred)
         return np.median(q)
 
-    def train(self, queries, cardinalities):
+    def train(self, queries, cardinalities, targ_score='q_error'):
         n = len(self.col_map)
         query_vecs = []
         for (cols, ops, vals) in queries:
@@ -115,10 +114,11 @@ class MCE_Estimator(CardEst):
 
         scoring = {
             'r2': 'r2',
+            'mae': 'neg_mean_absolute_error',
             'q_error': make_scorer(self._q_error, greater_is_better=False)
         }
 
-        targ_score = 'q_error'
+        assert targ_score in scoring
     
         if self.method == "linear":
             model = Lasso(max_iter=10000)

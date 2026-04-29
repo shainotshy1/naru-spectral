@@ -60,10 +60,10 @@ def main():
     seed = 286
     rng = np.random.RandomState(seed)
     
-    num_train = 10000
+    num_train = 5000
 
     max_rows = 10000
-    table_name = 'dmv'
+    table_name = 'dmv-tiny'
     target_ckpt = glob.glob('./models/dmv-tiny*.pt')[0]
     table, oracle_est = setup_data_model_eval(rng, table_name, target_ckpt, DEVICE, max_rows=max_rows)
     rows = min(table.cardinality, max_rows) if max_rows is not None else table.cardinality
@@ -72,10 +72,10 @@ def main():
 
     ind_est = IndepEstimator(table, table_name + f"-{rows}")
 
-    query_finder = QueryFinder(table, oracle_est, num_val_chunks=2)
+    query_finder = QueryFinder(table, oracle_est, num_val_chunks=1)
 
-    query_finder.train(seed, ind_est, num_train, expand_n=100, num_threads=num_threads)
-    benchmark_queries = query_finder.generate(rng, num_queries=100, max_spec_order=None)
+    query_finder.train(seed, ind_est, num_train, expand_n=1, num_threads=num_threads)
+    benchmark_queries = query_finder.generate(rng, num_queries=1, max_spec_order=None)
 
     # benchmark_queries = query_finder.generate_mh(rng, ind_est, num_queries=20, num_iterations=1000)
 
@@ -84,13 +84,13 @@ def main():
     cards = _compute_cardinalities(benchmark_queries, ind_est, num_threads=1)
     for i, (q, true_card, card) in enumerate(zip(benchmark_queries, true_cards, cards)):
         card, true_card = max(card, 1), max(true_card, 1) # Avoid divide-by-zero
-        print(f"Query {i+1}:")
-        for c,op,v in zip(q[0], q[1], q[2]):
-            print(f"     {c.name} {str(op)} {v}")
-        print(f"    True Cardinality: {true_card}")
-        print(f"    Indep Estimation: {card}")
+        # print(f"Query {i+1}:")
+        # for c,op,v in zip(q[0], q[1], q[2]):
+        #     print(f"     {c.name} {str(op)} {v}")
+        # print(f"    True Cardinality: {true_card}")
+        # print(f"    Indep Estimation: {card}")
         print(f"    Q-Error: {max(true_card, card) / min(true_card, card)}")
-        print()
+        # print()
 
     print('...Done')
 
